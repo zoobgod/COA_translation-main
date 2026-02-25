@@ -24,6 +24,13 @@ except (ImportError, OSError):
     HAS_FITZ = False
 
 try:
+    import pypdfium2 as pdfium
+
+    HAS_PDFIUM = True
+except (ImportError, OSError):
+    HAS_PDFIUM = False
+
+try:
     import pytesseract
     from PIL import Image, ImageFilter, ImageOps
 
@@ -67,6 +74,11 @@ def _is_sparse_text(text: str, page_count: int) -> bool:
     chars_per_page = len(text.strip()) / safe_pages
     alnum_per_page = sum(1 for ch in text if ch.isalnum()) / safe_pages
     return chars_per_page < 450 or alnum_per_page < 180
+
+
+def _looks_like_pdf(file_bytes: bytes) -> bool:
+    """Best-effort PDF signature check (handles some prefixed garbage bytes)."""
+    return b"%PDF-" in file_bytes[:1024]
 
 
 # ---------------------------------------------------------------------------
@@ -203,6 +215,18 @@ def _render_pages_to_images_pdfplumber(pdf_bytes: bytes, dpi: int = 300) -> list
     return images
 
 
+def _render_pages_to_images_pdfium(pdf_bytes: bytes, dpi: int = 300) -> list:
+    """Render PDF pages using pypdfium2 (if available)."""
+    images = []
+    pdf = pdfium.PdfDocument(pdf_bytes)
+    scale = dpi / 72
+    for i in range(len(pdf)):
+        page = pdf[i]
+        bitmap = page.render(scale=scale)
+        images.append(bitmap.to_pil())
+    return images
+
+
 def extract_with_ocr(
     pdf_bytes: bytes,
     preprocess: bool = True,
@@ -230,46 +254,103 @@ def extract_with_ocr(
 
     # --- Render pages to images ------------------------------------------
     page_images: list["Image.Image"] = []
-    try:
-        if HAS_FITZ:
-            page_images = _render_pages_to_images_fitz(pdf_bytes, dpi=300)
-        else:
-            page_images = _render_pages_to_images_pdfplumber(pdf_bytes, dpi=300)
-    except Exception as e:
-        logger.warning(f"Failed to render PDF pages to images: {e}")
+    render_errors: list[str] = []
+
+    for renderer_name, renderer in _get_pdf_ocr_renderers():
+        try:
+            page_images = renderer(pdf_bytes, dpi=300)
+            if page_images:
+                logger.info(
+                    "Rendered %s page(s) for OCR via %s",
+                    len(page_images),
+                    renderer_name,
+                )
+                break
+        except Exception as e:
+            msg = f"{renderer_name}: {e}"
+            render_errors.append(msg)
+            logger.warning("PDF OCR renderer failed (%s)", msg)
+
+    if not page_images:
+        if render_errors:
+            logger.warning(
+                "Failed to render PDF pages for OCR. Attempts: %s",
+                " | ".join(render_errors),
+            )
         return None, 0
 
-    page_count = len(page_images)
+    return _ocr_images(page_images, preprocess=preprocess, method_label="OCR")
+
+
+def extract_text_from_image_bytes(
+    image_bytes: bytes,
+    preprocess: bool = True,
+) -> tuple[Optional[str], int]:
+    """OCR extraction for uploaded image files or image-like payloads."""
+    if not HAS_OCR:
+        logger.warning("pytesseract or Pillow not installed; OCR unavailable")
+        return None, 0
+
+    images: list["Image.Image"] = []
+    try:
+        with Image.open(io.BytesIO(image_bytes)) as img:
+            frame_count = getattr(img, "n_frames", 1)
+            for frame_idx in range(frame_count):
+                if frame_count > 1:
+                    img.seek(frame_idx)
+                images.append(img.convert("RGB").copy())
+    except Exception as e:
+        logger.warning("Could not parse file bytes as image: %s", e)
+        return None, 0
+
+    return _ocr_images(images, preprocess=preprocess, method_label="Image OCR")
+
+
+def _get_pdf_ocr_renderers():
+    """Ordered list of PDF page renderers for OCR."""
+    renderers = []
+    if HAS_FITZ:
+        renderers.append(("PyMuPDF", _render_pages_to_images_fitz))
+    if HAS_PDFIUM:
+        renderers.append(("pdfium", _render_pages_to_images_pdfium))
+    renderers.append(("pdfplumber", _render_pages_to_images_pdfplumber))
+    return renderers
+
+
+def _ocr_images(
+    images: list["Image.Image"],
+    preprocess: bool = True,
+    method_label: str = "OCR",
+) -> tuple[Optional[str], int]:
+    """Run tesseract OCR on a list of PIL images."""
+    page_count = len(images)
     if page_count == 0:
         return None, 0
 
-    # --- OCR each page ---------------------------------------------------
-    # Tesseract config: PSM 6 = single uniform block of text,
-    #                   OEM 3 = default LSTM engine
     tess_config = "--psm 6 --oem 3"
-
     text_parts = []
-    for i, image in enumerate(page_images):
-        try:
-            if preprocess:
-                image = _preprocess_image_for_ocr(image)
 
+    for i, image in enumerate(images):
+        try:
+            working_image = _preprocess_image_for_ocr(image) if preprocess else image
             page_text = pytesseract.image_to_string(
-                image,
+                working_image,
                 lang="eng",
                 config=tess_config,
             )
-
-            # Quality gate: reject pages with too few alphanumeric characters
             alnum_count = sum(1 for ch in page_text if ch.isalnum())
             if alnum_count < 10:
-                logger.info(f"Page {i + 1}: OCR output too short ({alnum_count} alnum chars), skipping")
+                logger.info(
+                    "%s page %s too short (%s alnum), skipping",
+                    method_label,
+                    i + 1,
+                    alnum_count,
+                )
                 continue
 
-            text_parts.append(f"--- Page {i + 1} (OCR) ---\n{page_text.strip()}")
+            text_parts.append(f"--- Page {i + 1} ({method_label}) ---\n{page_text.strip()}")
         except Exception as e:
-            logger.warning(f"OCR failed on page {i + 1}: {e}")
-            continue
+            logger.warning("%s failed on page %s: %s", method_label, i + 1, e)
 
     result = "\n\n".join(text_parts).strip()
     return (result if result else None), page_count
@@ -375,11 +456,72 @@ def extract_text_from_pdf(pdf_bytes: bytes) -> dict:
             "page_count": best["page_count"] or page_count,
         }
 
+    # Last-resort fallback: sometimes users upload files labeled as .pdf that
+    # are actually image payloads. Try direct image OCR on raw bytes.
+    if HAS_OCR:
+        image_text, image_pages = extract_text_from_image_bytes(
+            pdf_bytes,
+            preprocess=True,
+        )
+        if image_text and image_text.strip():
+            return {
+                "text": image_text,
+                "method": "Image OCR fallback",
+                "success": True,
+                "page_count": image_pages or page_count or 1,
+            }
+
     return {
         "text": "",
         "method": "none",
         "success": False,
         "page_count": page_count,
+    }
+
+
+def extract_text_from_upload(file_bytes: bytes, filename: str = "") -> dict:
+    """
+    Unified extraction entrypoint for PDF and image uploads.
+    """
+    name = (filename or "").lower()
+    looks_pdf = _looks_like_pdf(file_bytes) or name.endswith(".pdf")
+
+    if looks_pdf:
+        return extract_text_from_pdf(file_bytes)
+
+    # Non-PDF uploads are treated as image files and OCR'd directly.
+    text, pages = extract_text_from_image_bytes(file_bytes, preprocess=True)
+    if text and text.strip():
+        return {
+            "text": text,
+            "method": "Image OCR",
+            "success": True,
+            "page_count": pages or 1,
+        }
+
+    text, pages = extract_text_from_image_bytes(file_bytes, preprocess=False)
+    if text and text.strip():
+        return {
+            "text": text,
+            "method": "Image OCR (no preprocessing)",
+            "success": True,
+            "page_count": pages or 1,
+        }
+
+    return {
+        "text": "",
+        "method": "none",
+        "success": False,
+        "page_count": pages or 0,
+    }
+
+
+def get_extraction_capabilities() -> dict:
+    """Runtime capability flags for UI diagnostics."""
+    return {
+        "has_ocr": HAS_OCR,
+        "has_fitz": HAS_FITZ,
+        "has_pdfium": HAS_PDFIUM,
     }
 
 

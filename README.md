@@ -4,8 +4,8 @@ Streamlit application that translates pharmaceutical Certificate of Analysis (CO
 
 ## Features
 
-- **PDF Upload** — Upload COA documents in PDF format
-- **Multi-method text extraction** — Uses pdfplumber (primary), PyMuPDF (fallback), and OCR via pytesseract (for scanned documents)
+- **PDF + Image Upload** — Upload COA documents as PDF or image files (`.png`, `.jpg`, `.tiff`, etc.)
+- **Multi-method text extraction** — Uses pdfplumber (primary), PyMuPDF/pdfium (fallback renderers), and OCR via pytesseract (for scanned documents)
 - **Optimized OCR pipeline** — Image preprocessing (grayscale, autocontrast, sharpening, binarization) with tuned Tesseract settings (PSM 6 for structured documents) and pdfplumber-based rendering fallback when PyMuPDF is unavailable
 - **AI Translation with pharma glossary** — Translates via OpenAI models with a 200+ term pharmaceutical glossary enforcing standard Russian pharmaceutical terminology
 - **Structured JSON translation** — OpenAI outputs a structured JSON response mapping content to predefined COA sections, ensuring consistent document layout
@@ -58,9 +58,9 @@ Then open the URL shown in the terminal (typically `http://localhost:8501`).
 ## Usage
 
 1. Enter your OpenAI API key in the sidebar
-2. Select a translation model (gpt-4o recommended for best quality)
+2. Select a translation model (supports advanced model IDs and custom model input)
 3. (Optional) Upload a custom `.docx` structure template in the sidebar
-4. Upload a COA PDF file
+4. Upload a COA PDF or image file
 5. Review the extracted text
 6. Click **Translate to Russian**
 7. Download the translated `.docx` file
@@ -117,7 +117,7 @@ Upload a `.docx` file containing Jinja2 placeholders (e.g. `{{ product_name }}`,
 
 The OCR system is designed for scanned pharmaceutical COA documents:
 
-1. **Page rendering** — PyMuPDF at 300 DPI (preferred), or pdfplumber `page.to_image()` as fallback
+1. **Page rendering** — PyMuPDF at 300 DPI (preferred), pdfium fallback, then pdfplumber `page.to_image()`
 2. **Image preprocessing** — Grayscale → upscale (if small) → autocontrast → sharpen → binarize
 3. **Tesseract OCR** — PSM 6 (single uniform block, good for forms/tables), OEM 3 (LSTM engine)
 4. **Quality gate** — Pages with fewer than 10 alphanumeric characters are rejected

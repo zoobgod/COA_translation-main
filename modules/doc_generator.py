@@ -16,6 +16,8 @@ Supports two modes:
 import io
 import logging
 import os
+import re
+from difflib import SequenceMatcher
 from datetime import datetime
 
 from docx import Document
@@ -36,6 +38,88 @@ from modules.coa_structure import (
 logger = logging.getLogger(__name__)
 
 TEMPLATE_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "templates")
+
+SECTION_ALIASES = {
+    "document_title": [
+        "наименование документа",
+        "certificate of analysis",
+        "coa",
+        "document title",
+        "название документа",
+        "title",
+    ],
+    "company_info": [
+        "информация о компании",
+        "manufacturer",
+        "supplier",
+        "company",
+        "адрес",
+        "контакт",
+    ],
+    "product_name": [
+        "наименование продукта",
+        "product name",
+        "product",
+        "inn",
+        "generic name",
+    ],
+    "product_details": [
+        "сведения о продукте",
+        "cas",
+        "molecular formula",
+        "molecular weight",
+        "composition",
+        "specification",
+        "grade",
+    ],
+    "batch_info": [
+        "информация о серии",
+        "batch",
+        "lot",
+        "mfg",
+        "expiry",
+        "retest",
+        "series",
+    ],
+    "storage_conditions": [
+        "условия хранения",
+        "storage",
+        "хранить",
+        "temperature",
+        "protect from",
+    ],
+    "test_results": [
+        "результаты испытаний",
+        "test results",
+        "analysis",
+        "assay",
+        "impurities",
+        "parameter",
+        "method",
+    ],
+    "conclusion": [
+        "заключение",
+        "conclusion",
+        "complies",
+        "release",
+        "disposition",
+    ],
+    "signatures": [
+        "подписи",
+        "signature",
+        "approved by",
+        "qa",
+        "qc",
+        "authorised",
+    ],
+    "notes": [
+        "примечания",
+        "notes",
+        "remark",
+        "comment",
+        "дополнительно",
+    ],
+}
 
 
 # =========================================================================
@@ -537,7 +621,7 @@ def _append_missing_sections(doc: Document, sections: dict, inserted_keys: set[s
 
 def _match_section_key(text: str) -> str | None:
     """Map paragraph heading text to a known COA section key."""
-    heading = text.strip().lower()
+    heading = _normalise_heading(text)
     if not heading:
         return None
 
@@ -546,7 +630,21 @@ def _match_section_key(text: str) -> str | None:
             return key
 
     for key, label in COA_FIELD_LABELS.items():
-        if heading == label.lower():
+        if heading == _normalise_heading(label):
+            return key
+
+    for key, aliases in SECTION_ALIASES.items():
+        for alias in aliases:
+            alias_norm = _normalise_heading(alias)
+            if not alias_norm:
+                continue
+            if alias_norm in heading:
+                return key
+            if SequenceMatcher(a=heading, b=alias_norm).ratio() >= 0.84:
+                return key
+
+    for key, label in COA_FIELD_LABELS.items():
+        if SequenceMatcher(a=heading, b=_normalise_heading(label)).ratio() >= 0.84:
             return key
 
     return None
@@ -585,3 +683,11 @@ def _extract_document_text(doc: Document) -> str:
                     parts.append(cell.text)
 
     return "\n".join(parts)
+
+
+def _normalise_heading(text: str) -> str:
+    """Normalise headings for robust matching."""
+    lowered = text.strip().lower()
+    cleaned = re.sub(r"[^a-zа-я0-9 ]+", " ", lowered, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\s+", " ", cleaned)
+    return cleaned.strip()

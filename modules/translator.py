@@ -230,7 +230,8 @@ def _translate_plain(
                 + chunk
             )
 
-            response = client.chat.completions.create(
+            response = _create_chat_completion(
+                client=client,
                 model=model,
                 messages=[
                     {"role": "system", "content": system_prompt},
@@ -285,7 +286,8 @@ def _translate_structured(
             + text
         )
 
-        response = client.chat.completions.create(
+        response = _create_chat_completion(
+            client=client,
             model=model,
             messages=[
                 {"role": "system", "content": system_prompt},
@@ -294,6 +296,7 @@ def _translate_structured(
             temperature=0.1,
             # Encourage the model to produce enough output for the full COA
             max_tokens=STRUCTURED_MAX_TOKENS,
+            response_format={"type": "json_object"},
         )
 
         raw = response.choices[0].message.content or ""
@@ -369,6 +372,38 @@ def _error_result(error: str, model: str) -> dict:
         "model_used": model,
         "chunks_translated": 0,
     }
+
+
+def _create_chat_completion(client: OpenAI, model: str, **kwargs):
+    """
+    Wrapper around chat.completions.create to support different model families
+    that expect different max-token parameter names.
+    """
+    payload = dict(kwargs)
+    max_tokens = payload.pop("max_tokens", None)
+    if max_tokens is not None:
+        token_param = (
+            "max_completion_tokens"
+            if _uses_completion_token_param(model)
+            else "max_tokens"
+        )
+        payload[token_param] = max_tokens
+
+    try:
+        return client.chat.completions.create(model=model, **payload)
+    except Exception as e:
+        # Some SDK/model combinations do not support response_format/json mode.
+        if "response_format" in payload and "response_format" in str(e).lower():
+            logger.warning("response_format unsupported, retrying without it: %s", e)
+            payload.pop("response_format", None)
+            return client.chat.completions.create(model=model, **payload)
+        raise
+
+
+def _uses_completion_token_param(model: str) -> bool:
+    """Models that typically expect max_completion_tokens."""
+    m = (model or "").lower()
+    return m.startswith("o") or m.startswith("gpt-5")
 
 
 def _normalise_sections(sections: dict) -> dict:

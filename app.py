@@ -8,7 +8,10 @@ and download the result as a fixed-structure Word document.
 
 import streamlit as st
 
-from modules.pdf_extractor import extract_text_from_pdf
+from modules.pdf_extractor import (
+    extract_text_from_upload,
+    get_extraction_capabilities,
+)
 from modules.translator import translate_text_structured
 from modules.doc_generator import generate_structured_doc
 
@@ -65,9 +68,31 @@ with st.sidebar:
 
     model_choice = st.selectbox(
         "Translation Model",
-        options=["gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "gpt-3.5-turbo"],
+        options=[
+            "gpt-5",
+            "gpt-5-mini",
+            "o3",
+            "gpt-4.1",
+            "gpt-4o",
+            "gpt-4o-mini",
+            "Custom model ID",
+        ],
         index=0,
-        help="gpt-4o recommended for best quality pharmaceutical translations.",
+        help=(
+            "Choose your model tier. If your org has access to newer models, "
+            "you can also enter any custom model ID."
+        ),
+    )
+    custom_model_id = ""
+    if model_choice == "Custom model ID":
+        custom_model_id = st.text_input(
+            "Custom model ID",
+            placeholder="e.g. gpt-5",
+            help="Exact model ID from your OpenAI account access.",
+        )
+    selected_model = custom_model_id.strip() or model_choice
+    selected_model_valid = not (
+        model_choice == "Custom model ID" and not custom_model_id.strip()
     )
 
     st.divider()
@@ -106,12 +131,22 @@ with st.sidebar:
 # ---------------------------------------------------------------------------
 # Main content
 # ---------------------------------------------------------------------------
-st.subheader("1. Upload COA PDF")
+st.subheader("1. Upload COA File")
+
+caps = get_extraction_capabilities()
+if not caps["has_ocr"]:
+    st.warning(
+        "OCR engine is not available in this environment. Scanned PDFs/images "
+        "will not be readable until Tesseract OCR is installed."
+    )
 
 uploaded_file = st.file_uploader(
-    "Upload a Certificate of Analysis in PDF format",
-    type=["pdf"],
-    help="Supports text-based and scanned (OCR) PDFs up to 50 MB.",
+    "Upload a Certificate of Analysis (PDF or image)",
+    type=["pdf", "png", "jpg", "jpeg", "tif", "tiff", "bmp", "webp"],
+    help=(
+        "Supports text-based PDFs, scanned/image-based PDFs, and image files "
+        "(PNG/JPG/TIFF/BMP/WEBP) up to 50 MB."
+    ),
 )
 
 if uploaded_file is not None:
@@ -134,8 +169,11 @@ if uploaded_file is not None:
         "extraction_result" not in st.session_state
         or st.session_state.get("last_file_signature") != file_signature
     ):
-        with st.spinner("Extracting text from PDF..."):
-            extraction = extract_text_from_pdf(pdf_bytes)
+        with st.spinner("Extracting text from file..."):
+            extraction = extract_text_from_upload(
+                pdf_bytes,
+                filename=uploaded_file.name,
+            )
             st.session_state["extraction_result"] = extraction
             st.session_state["last_file_signature"] = file_signature
             # Clear stale downstream state
@@ -168,6 +206,8 @@ if uploaded_file is not None:
             st.warning(
                 "Please enter your OpenAI API key in the sidebar to proceed."
             )
+        elif not selected_model_valid:
+            st.warning("Please provide a custom model ID.")
         else:
             translate_btn = st.button(
                 "Translate to Russian",
@@ -194,7 +234,7 @@ if uploaded_file is not None:
                         result = translate_text_structured(
                             text=extraction["text"],
                             api_key=api_key,
-                            model=model_choice,
+                            model=selected_model,
                             progress_callback=update_progress,
                         )
 
@@ -278,15 +318,16 @@ if uploaded_file is not None:
 
     else:
         st.error(
-            "Could not extract text from the PDF. "
-            "The file may be corrupted or empty."
+            "Could not extract text from the uploaded file. "
+            "The file may be corrupted, image quality may be too low, "
+            "or OCR may be unavailable."
         )
         st.info(
             "Tips:\n"
             "- Ensure the PDF is not password-protected\n"
-            "- Try a different PDF if the file seems corrupted\n"
-            "- For scanned documents, ensure pytesseract and Tesseract "
-            "are installed on the server"
+            "- Try 300 DPI+ scans with strong contrast\n"
+            "- Upload as PNG/JPG if scanner exports problematic PDFs\n"
+            "- Ensure pytesseract + Tesseract are installed on the server"
         )
 
 # ---------------------------------------------------------------------------
