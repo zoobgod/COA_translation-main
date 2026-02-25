@@ -13,7 +13,7 @@ from modules.pdf_extractor import (
     get_extraction_capabilities,
 )
 from modules.translator import translate_text_structured
-from modules.doc_generator import generate_structured_doc
+from modules.doc_generator import generate_structured_doc, extract_template_hints
 
 # ---------------------------------------------------------------------------
 # Page config
@@ -153,6 +153,24 @@ if uploaded_file is not None:
     pdf_bytes = uploaded_file.getvalue()
     file_size_mb = len(pdf_bytes) / (1024 * 1024)
     file_signature = (uploaded_file.name, len(pdf_bytes))
+    template_bytes = user_template.getvalue() if user_template else None
+    template_signature = (
+        (user_template.name, len(template_bytes))
+        if user_template and template_bytes is not None
+        else None
+    )
+
+    if st.session_state.get("last_template_signature") != template_signature:
+        st.session_state["last_template_signature"] = template_signature
+        st.session_state.pop("template_hints", None)
+        st.session_state.pop("translation_result", None)
+        st.session_state.pop("doc_bytes", None)
+
+    template_hints = None
+    if template_bytes:
+        if "template_hints" not in st.session_state:
+            st.session_state["template_hints"] = extract_template_hints(template_bytes)
+        template_hints = st.session_state["template_hints"]
 
     col1, col2 = st.columns(2)
     with col1:
@@ -197,6 +215,15 @@ if uploaded_file is not None:
                 disabled=True,
             )
 
+        if template_hints:
+            placeholders_count = len(template_hints.get("placeholders", []))
+            headings_count = len(template_hints.get("headings", []))
+            st.caption(
+                "Template detected: "
+                f"{placeholders_count} placeholder(s), "
+                f"{headings_count} heading hint(s)."
+            )
+
         # ------------------------------------------------------------------
         # Step 3: Translate
         # ------------------------------------------------------------------
@@ -236,6 +263,7 @@ if uploaded_file is not None:
                             api_key=api_key,
                             model=selected_model,
                             progress_callback=update_progress,
+                            template_hints=template_hints,
                         )
 
                     progress_bar.empty()
@@ -269,16 +297,17 @@ if uploaded_file is not None:
 
                     if "doc_bytes" not in st.session_state or translate_btn:
                         with st.spinner("Generating Word document..."):
-                            template_bytes = None
-                            if user_template:
-                                template_bytes = user_template.getvalue()
-
                             doc_bytes = generate_structured_doc(
                                 sections=result.get("sections", {}),
                                 original_filename=uploaded_file.name,
                                 extraction_method=extraction["method"],
                                 model_used=result["model_used"],
                                 user_template_bytes=template_bytes,
+                                template_fields=result.get("template_fields", {}),
+                                template_heading_map=result.get(
+                                    "template_heading_map",
+                                    {},
+                                ),
                             )
                             st.session_state["doc_bytes"] = doc_bytes
                     else:

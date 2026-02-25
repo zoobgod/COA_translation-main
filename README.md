@@ -11,6 +11,7 @@ Streamlit application that translates pharmaceutical Certificate of Analysis (CO
 - **Structured JSON translation** — OpenAI outputs a structured JSON response mapping content to predefined COA sections, ensuring consistent document layout
 - **Fixed-structure Word output** — Every output document follows the same 10-section predefined structure regardless of the original PDF layout
 - **Custom template support** — Optionally upload your own `.docx` template with Jinja2 placeholders for custom formatting
+- **Template-aware translation pass** — If a template is uploaded, placeholder/heading hints are included in the same translation request to improve template population
 - **Download** — One-click download of the translated document
 
 ## Setup
@@ -36,6 +37,16 @@ sudo apt-get install tesseract-ocr
 # macOS
 brew install tesseract
 ```
+
+### Streamlit Community Cloud deployment
+
+This repo includes `packages.txt` for apt-level dependencies used by OCR:
+
+- `tesseract-ocr`
+- `tesseract-ocr-eng`
+
+When deployed from GitHub to Streamlit Community Cloud, these packages are
+installed automatically before Python dependencies from `requirements.txt`.
 
 ### Generate the Word template (optional)
 

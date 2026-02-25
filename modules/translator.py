@@ -187,6 +187,7 @@ def translate_text_structured(
     api_key: str,
     model: str = "gpt-4o",
     progress_callback: Optional[callable] = None,
+    template_hints: Optional[dict] = None,
 ) -> dict:
     """
     Translate pharmaceutical COA text and return **structured** output — a
@@ -198,7 +199,13 @@ def translate_text_structured(
             - 'translated_text': flattened plain-text version for preview
             - 'success' / 'error' / 'model_used' / 'chunks_translated'
     """
-    return _translate_structured(text, api_key, model, progress_callback)
+    return _translate_structured(
+        text,
+        api_key,
+        model,
+        progress_callback,
+        template_hints=template_hints,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -240,7 +247,7 @@ def _translate_plain(
                 temperature=0.1,
             )
 
-            translated = response.choices[0].message.content
+            translated = response["content"]
             if translated:
                 translated_parts.append(translated.strip())
 
@@ -267,6 +274,7 @@ def _translate_structured(
     api_key: str,
     model: str,
     progress_callback: Optional[callable],
+    template_hints: Optional[dict] = None,
 ) -> dict:
     if not text.strip():
         return _error_result("No text provided for translation", model)
@@ -285,6 +293,9 @@ def _translate_structured(
             "Return ONLY valid JSON.\n\n"
             + text
         )
+        template_instruction = _build_template_instruction(template_hints)
+        if template_instruction:
+            user_message += "\n\n" + template_instruction
 
         response = _create_chat_completion(
             client=client,
@@ -299,8 +310,8 @@ def _translate_structured(
             response_format={"type": "json_object"},
         )
 
-        raw = response.choices[0].message.content or ""
-        finish_reason = response.choices[0].finish_reason
+        raw = response["content"]
+        finish_reason = response["finish_reason"] or "stop"
 
         if progress_callback:
             progress_callback(2, 2)
@@ -313,7 +324,18 @@ def _translate_structured(
             lines = [l for l in lines if not l.strip().startswith("```")]
             json_str = "\n".join(lines)
 
-        sections = _normalise_sections(json.loads(json_str))
+        parsed = json.loads(json_str)
+        parsed_dict = parsed if isinstance(parsed, dict) else {}
+        sections = _normalise_sections(parsed_dict)
+        template_fields = _normalise_template_fields(
+            parsed_dict.get("template_fields"),
+            template_hints,
+            sections,
+        )
+        template_heading_map = _normalise_template_heading_map(
+            parsed_dict.get("template_heading_map"),
+            template_hints,
+        )
 
         # If structured output is likely truncated/incomplete, backfill full
         # plain translation into notes so no source content is lost.
@@ -335,6 +357,8 @@ def _translate_structured(
 
         return {
             "sections": sections,
+            "template_fields": template_fields,
+            "template_heading_map": template_heading_map,
             "translated_text": _build_preview_from_sections(sections),
             "success": True,
             "error": None,
@@ -352,6 +376,15 @@ def _translate_structured(
             sections = {k: "" for k in COA_FIELD_KEYS}
             sections["notes"] = plain_result["translated_text"]
             plain_result["sections"] = sections
+            plain_result["template_fields"] = _normalise_template_fields(
+                None,
+                template_hints,
+                sections,
+            )
+            plain_result["template_heading_map"] = _normalise_template_heading_map(
+                None,
+                template_hints,
+            )
         return plain_result
 
     except Exception as e:
@@ -367,6 +400,8 @@ def _error_result(error: str, model: str) -> dict:
     return {
         "translated_text": "",
         "sections": {},
+        "template_fields": {},
+        "template_heading_map": {},
         "success": False,
         "error": error,
         "model_used": model,
@@ -374,10 +409,12 @@ def _error_result(error: str, model: str) -> dict:
     }
 
 
-def _create_chat_completion(client: OpenAI, model: str, **kwargs):
+def _create_chat_completion(client: OpenAI, model: str, **kwargs) -> dict:
     """
-    Wrapper around chat.completions.create to support different model families
-    that expect different max-token parameter names.
+    Wrapper around chat.completions that:
+    - adapts token-parameter naming by model family
+    - retries without response_format when unsupported
+    - falls back to Responses API for models not accepted by Chat Completions
     """
     payload = dict(kwargs)
     max_tokens = payload.pop("max_tokens", None)
@@ -389,21 +426,215 @@ def _create_chat_completion(client: OpenAI, model: str, **kwargs):
         )
         payload[token_param] = max_tokens
 
+    def _call_chat(chat_payload: dict):
+        response = client.chat.completions.create(model=model, **chat_payload)
+        return {
+            "content": response.choices[0].message.content or "",
+            "finish_reason": response.choices[0].finish_reason or "stop",
+        }
+
     try:
-        return client.chat.completions.create(model=model, **payload)
+        return _call_chat(payload)
     except Exception as e:
-        # Some SDK/model combinations do not support response_format/json mode.
-        if "response_format" in payload and "response_format" in str(e).lower():
+        message = str(e).lower()
+        if "response_format" in payload and "response_format" in message:
             logger.warning("response_format unsupported, retrying without it: %s", e)
-            payload.pop("response_format", None)
-            return client.chat.completions.create(model=model, **payload)
+            reduced = dict(payload)
+            reduced.pop("response_format", None)
+            try:
+                return _call_chat(reduced)
+            except Exception as inner:
+                inner_message = str(inner).lower()
+                if _should_try_responses_fallback(model, inner_message):
+                    return _create_with_responses_api(client, model, reduced)
+                raise
+
+        if _should_try_responses_fallback(model, message):
+            logger.warning(
+                "Chat completion failed for model '%s'; trying Responses API fallback",
+                model,
+            )
+            return _create_with_responses_api(client, model, payload)
         raise
+
+
+def _should_try_responses_fallback(model: str, error_message: str) -> bool:
+    m = (model or "").lower()
+    return (
+        m.startswith("gpt-5")
+        or m.startswith("o")
+        or "responses api" in error_message
+        or "not supported in the v1/chat/completions endpoint" in error_message
+        or "unsupported model" in error_message
+    )
+
+
+def _create_with_responses_api(client: OpenAI, model: str, payload: dict) -> dict:
+    """
+    Best-effort fallback using Responses API for newer models.
+    """
+    if not hasattr(client, "responses"):
+        raise RuntimeError("Installed OpenAI SDK does not support Responses API")
+
+    req: dict = {
+        "model": model,
+        "input": payload.get("messages", []),
+    }
+
+    if "temperature" in payload:
+        req["temperature"] = payload["temperature"]
+
+    if "max_completion_tokens" in payload:
+        req["max_output_tokens"] = payload["max_completion_tokens"]
+    elif "max_tokens" in payload:
+        req["max_output_tokens"] = payload["max_tokens"]
+
+    # Keep prompt-level JSON constraints; omit chat-only response_format here.
+    response = client.responses.create(**req)
+    content = getattr(response, "output_text", "") or ""
+    finish = getattr(response, "status", None) or "stop"
+    return {"content": content, "finish_reason": finish}
 
 
 def _uses_completion_token_param(model: str) -> bool:
     """Models that typically expect max_completion_tokens."""
     m = (model or "").lower()
     return m.startswith("o") or m.startswith("gpt-5")
+
+
+def _build_template_instruction(template_hints: Optional[dict]) -> str:
+    """
+    Build prompt instructions that align translation output with a user
+    template in the same API call.
+    """
+    if not isinstance(template_hints, dict):
+        return ""
+
+    placeholders = template_hints.get("placeholders") or []
+    headings = template_hints.get("headings") or []
+
+    lines: list[str] = []
+    if placeholders:
+        lines.append(
+            "Template placeholders were supplied by the user. Include an "
+            "additional JSON object key named \"template_fields\" where each "
+            "placeholder below is present as a key with translated content "
+            "(or empty string if unavailable):"
+        )
+        lines.extend(f'- "{p}"' for p in placeholders[:80])
+        lines.append(
+            'Example: "template_fields": {"product": "...", "batch_no": "..."}'
+        )
+
+    if headings:
+        lines.append(
+            "Template heading hints. Also include JSON key "
+            "\"template_heading_map\" mapping each heading to one of these "
+            f"section keys: {', '.join(COA_FIELD_KEYS)}."
+        )
+        lines.append(
+            "Example: "
+            '"template_heading_map": {"Product": "product_name", '
+            '"Results": "test_results"}'
+        )
+        lines.extend(f"- {h}" for h in headings[:30])
+
+    return "\n".join(lines)
+
+
+def _normalise_template_fields(
+    template_fields_raw,
+    template_hints: Optional[dict],
+    sections: dict,
+) -> dict:
+    """
+    Ensure template_fields is always a dict and contains all provided
+    placeholders (if any), with heuristic fallback from section values.
+    """
+    result: dict = {}
+    if isinstance(template_fields_raw, dict):
+        for key, value in template_fields_raw.items():
+            if key:
+                result[str(key)] = "" if value is None else str(value)
+
+    placeholders = []
+    if isinstance(template_hints, dict):
+        placeholders = template_hints.get("placeholders") or []
+
+    for placeholder in placeholders:
+        if placeholder in result and result[placeholder].strip():
+            continue
+        mapped_key = _map_placeholder_to_section(placeholder)
+        if not mapped_key:
+            result.setdefault(placeholder, "")
+            continue
+
+        value = sections.get(mapped_key, "")
+        if isinstance(value, list):
+            lines = [" | ".join(str(cell) for cell in row) for row in value]
+            result[placeholder] = "\n".join(lines)
+        else:
+            result[placeholder] = "" if value is None else str(value)
+
+    return result
+
+
+def _map_placeholder_to_section(placeholder: str) -> Optional[str]:
+    """Heuristic mapping from arbitrary placeholder names to COA keys."""
+    raw = (placeholder or "").strip().lower().replace("_", " ")
+    cleaned = " ".join(raw.split())
+    if not cleaned:
+        return None
+
+    if placeholder in COA_FIELD_KEYS:
+        return placeholder
+
+    candidate_space = []
+    for key in COA_FIELD_KEYS:
+        candidate_space.append((key, key.replace("_", " ")))
+        candidate_space.append((key, COA_FIELD_LABELS[key].lower()))
+
+    best_key = None
+    best_score = 0.0
+    from difflib import SequenceMatcher
+
+    for key, label in candidate_space:
+        score = SequenceMatcher(a=cleaned, b=label).ratio()
+        if label in cleaned or cleaned in label:
+            score = max(score, 0.9)
+        if score > best_score:
+            best_key = key
+            best_score = score
+
+    return best_key if best_score >= 0.62 else None
+
+
+def _normalise_template_heading_map(
+    heading_map_raw,
+    template_hints: Optional[dict],
+) -> dict:
+    """Validate/normalise AI heading map for template insertion."""
+    hints = template_hints if isinstance(template_hints, dict) else {}
+    headings = hints.get("headings") or []
+    normalised: dict = {}
+
+    if isinstance(heading_map_raw, dict):
+        for heading, key in heading_map_raw.items():
+            if not heading or not key:
+                continue
+            mapped = str(key).strip()
+            if mapped in COA_FIELD_KEYS:
+                normalised[str(heading)] = mapped
+
+    # Fallback heuristic mapping when model omitted heading map.
+    for heading in headings:
+        if heading in normalised:
+            continue
+        mapped = _map_placeholder_to_section(heading)
+        if mapped:
+            normalised[heading] = mapped
+
+    return normalised
 
 
 def _normalise_sections(sections: dict) -> dict:

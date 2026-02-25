@@ -17,6 +17,7 @@ import io
 import logging
 import os
 import re
+import zipfile
 from difflib import SequenceMatcher
 from datetime import datetime
 
@@ -132,6 +133,8 @@ def generate_structured_doc(
     extraction_method: str,
     model_used: str,
     user_template_bytes: bytes | None = None,
+    template_fields: dict | None = None,
+    template_heading_map: dict | None = None,
 ) -> bytes:
     """
     Generate a Word document from structured (section-keyed) translation data.
@@ -145,6 +148,10 @@ def generate_structured_doc(
         user_template_bytes: Optional .docx template uploaded by the user.
                              Must contain Jinja2 placeholders matching the
                              COA field keys.
+        template_fields: Optional AI-produced mapping for user template
+                         placeholders.
+        template_heading_map: Optional AI-produced mapping of template
+                              headings to COA section keys.
 
     Returns:
         bytes of the generated .docx file.
@@ -153,11 +160,60 @@ def generate_structured_doc(
         return _render_user_template(
             sections, original_filename, extraction_method, model_used,
             user_template_bytes,
+            template_fields=template_fields,
+            template_heading_map=template_heading_map,
         )
 
     return _generate_fixed_structure(
         sections, original_filename, extraction_method, model_used,
     )
+
+
+def extract_template_hints(template_bytes: bytes) -> dict:
+    """
+    Extract lightweight template hints used to guide translation and filling.
+
+    Returns:
+        {
+            "placeholders": [list of Jinja placeholders],
+            "headings": [list of heading-like lines from the template]
+        }
+    """
+    placeholders = sorted(_extract_jinja_placeholders_from_docx_xml(template_bytes))
+    headings: list[str] = []
+
+    try:
+        doc = Document(io.BytesIO(template_bytes))
+        for paragraph in doc.paragraphs:
+            text = (paragraph.text or "").strip()
+            if not text:
+                continue
+            if len(text) > 140:
+                continue
+            if "{{" in text and "}}" in text:
+                continue
+            headings.append(text)
+            if len(headings) >= 40:
+                break
+        if len(headings) < 40:
+            for table in doc.tables:
+                for row in table.rows[:3]:
+                    for cell in row.cells:
+                        text = (cell.text or "").strip()
+                        if not text or len(text) > 100:
+                            continue
+                        if text not in headings:
+                            headings.append(text)
+                        if len(headings) >= 40:
+                            break
+                    if len(headings) >= 40:
+                        break
+                if len(headings) >= 40:
+                    break
+    except Exception:
+        headings = []
+
+    return {"placeholders": placeholders, "headings": headings}
 
 
 def generate_doc_from_template(
@@ -188,6 +244,8 @@ def _render_user_template(
     extraction_method: str,
     model_used: str,
     template_bytes: bytes,
+    template_fields: dict | None = None,
+    template_heading_map: dict | None = None,
 ) -> bytes:
     """Render a user-provided .docx template with docxtpl."""
     if not _template_has_jinja_placeholders(template_bytes):
@@ -200,25 +258,19 @@ def _render_user_template(
             extraction_method,
             model_used,
             template_bytes,
+            template_heading_map=template_heading_map,
         )
 
     doc = DocxTemplate(io.BytesIO(template_bytes))
 
-    # Build the context — include every section key plus metadata
-    context = dict(sections)
-
-    # Flatten table data to a multi-line string for simple {{ }} placeholders
-    for key in COA_FIELD_KEYS:
-        if COA_FIELD_IS_TABLE.get(key) and isinstance(sections.get(key), list):
-            rows = sections[key]
-            context[key] = _table_to_text(rows)
-
-    context.update({
-        "original_filename": original_filename,
-        "translation_date": datetime.now().strftime("%d.%m.%Y"),
-        "model_used": model_used,
-        "extraction_method": extraction_method,
-    })
+    context = _build_template_context(
+        sections=sections,
+        template_bytes=template_bytes,
+        original_filename=original_filename,
+        extraction_method=extraction_method,
+        model_used=model_used,
+        template_fields=template_fields,
+    )
 
     try:
         doc.render(context)
@@ -235,9 +287,10 @@ def _render_user_template(
             extraction_method,
             model_used,
             template_bytes,
+            template_heading_map=template_heading_map,
         )
 
-    if not _rendered_template_has_translated_content(rendered, sections):
+    if not _rendered_template_has_translated_content(rendered, sections, template_fields):
         logger.warning(
             "Rendered template appears to miss translated content; "
             "using structural fallback"
@@ -248,6 +301,7 @@ def _render_user_template(
             extraction_method,
             model_used,
             template_bytes,
+            template_heading_map=template_heading_map,
         )
 
     return rendered
@@ -478,26 +532,112 @@ def _table_to_text(rows: list[list]) -> str:
 
 def _template_has_jinja_placeholders(template_bytes: bytes) -> bool:
     """Check whether the template includes expected Jinja placeholders."""
+    return len(_extract_jinja_placeholders_from_docx_xml(template_bytes)) > 0
+
+
+def _build_template_context(
+    sections: dict,
+    template_bytes: bytes,
+    original_filename: str,
+    extraction_method: str,
+    model_used: str,
+    template_fields: dict | None = None,
+) -> dict:
+    """
+    Build rendering context for docxtpl:
+    - canonical section keys
+    - metadata keys
+    - AI-produced template_fields (if any)
+    - heuristic mapping for non-standard placeholder names
+    """
+    context = dict(sections)
+
+    # Flatten table fields to text for simple placeholders.
+    for key in COA_FIELD_KEYS:
+        if COA_FIELD_IS_TABLE.get(key) and isinstance(sections.get(key), list):
+            context[key] = _table_to_text(sections[key])
+
+    context.update({
+        "original_filename": original_filename,
+        "translation_date": datetime.now().strftime("%d.%m.%Y"),
+        "model_used": model_used,
+        "extraction_method": extraction_method,
+    })
+
+    if isinstance(template_fields, dict):
+        for key, value in template_fields.items():
+            if key:
+                context[key] = "" if value is None else str(value)
+
+    placeholders = _extract_jinja_placeholders_from_docx_xml(template_bytes)
+    for placeholder in placeholders:
+        if placeholder in context and str(context[placeholder]).strip():
+            continue
+        mapped_key = _map_placeholder_to_section(placeholder)
+        if mapped_key:
+            value = sections.get(mapped_key, "")
+            if COA_FIELD_IS_TABLE.get(mapped_key) and isinstance(value, list):
+                value = _table_to_text(value)
+            context[placeholder] = value if value is not None else ""
+
+    return context
+
+
+def _extract_jinja_placeholders_from_docx_xml(template_bytes: bytes) -> set[str]:
+    """
+    Extract Jinja placeholders directly from DOCX XML payload.
+    More reliable than paragraph-text extraction when Word splits runs.
+    """
+    placeholders: set[str] = set()
+    pattern = re.compile(r"\{\{\s*([a-zA-Z0-9_\.]+)\s*\}\}")
     try:
-        doc = Document(io.BytesIO(template_bytes))
+        with zipfile.ZipFile(io.BytesIO(template_bytes), "r") as zf:
+            for name in zf.namelist():
+                if not name.startswith("word/") or not name.endswith(".xml"):
+                    continue
+                xml_text = zf.read(name).decode("utf-8", errors="ignore")
+                for match in pattern.findall(xml_text):
+                    placeholders.add(match.strip())
     except Exception:
-        return False
-
-    text = _extract_document_text(doc)
-    placeholder_keys = COA_FIELD_KEYS + [
-        "original_filename",
-        "translation_date",
-        "model_used",
-        "extraction_method",
-    ]
-
-    for key in placeholder_keys:
-        if f"{{{{ {key} }}}}" in text or f"{{{{{key}}}}}" in text:
-            return True
-    return False
+        return set()
+    return placeholders
 
 
-def _rendered_template_has_translated_content(rendered_bytes: bytes, sections: dict) -> bool:
+def _map_placeholder_to_section(placeholder: str) -> str | None:
+    """Map arbitrary placeholder names to known COA keys."""
+    norm = _normalise_heading(placeholder.replace("_", " "))
+    if not norm:
+        return None
+
+    if placeholder in COA_FIELD_KEYS:
+        return placeholder
+
+    best_key = None
+    best_score = 0.0
+
+    for key in COA_FIELD_KEYS:
+        key_norm = _normalise_heading(key.replace("_", " "))
+        score = SequenceMatcher(a=norm, b=key_norm).ratio()
+        if score > best_score:
+            best_key, best_score = key, score
+
+    for key, aliases in SECTION_ALIASES.items():
+        for alias in aliases:
+            alias_norm = _normalise_heading(alias)
+            if alias_norm and alias_norm in norm:
+                return key
+            score = SequenceMatcher(a=norm, b=alias_norm).ratio()
+            if score > best_score:
+                best_key, best_score = key, score
+
+    return best_key if best_score >= 0.62 else None
+
+
+def _rendered_template_has_translated_content(
+    rendered_bytes: bytes,
+    sections: dict,
+    template_fields: dict | None = None,
+) -> bool:
     """
     Verify rendered template contains at least one non-trivial translated
     snippet. Guards against structure-only outputs.
@@ -515,6 +655,13 @@ def _rendered_template_has_translated_content(rendered_bytes: bytes, sections: d
                     candidates.append(row_text[:40].lower())
         if len(candidates) >= 6:
             break
+
+    if isinstance(template_fields, dict):
+        for value in template_fields.values():
+            if isinstance(value, str) and len(value.strip()) >= 20:
+                candidates.append(value.strip()[:40].lower())
+            if len(candidates) >= 10:
+                break
 
     if not candidates:
         return True
@@ -534,6 +681,7 @@ def _inject_translation_into_template(
     extraction_method: str,
     model_used: str,
     template_bytes: bytes,
+    template_heading_map: dict | None = None,
 ) -> bytes:
     """
     Fallback for non-Jinja templates:
@@ -542,7 +690,11 @@ def _inject_translation_into_template(
     """
     doc = Document(io.BytesIO(template_bytes))
 
-    inserted_keys = _insert_content_under_matching_headings(doc, sections)
+    inserted_keys = _insert_content_under_matching_headings(
+        doc,
+        sections,
+        template_heading_map=template_heading_map,
+    )
     _append_missing_sections(doc, sections, inserted_keys)
 
     # Ensure metadata is always present in fallback mode.
@@ -555,13 +707,20 @@ def _inject_translation_into_template(
     return buf.getvalue()
 
 
-def _insert_content_under_matching_headings(doc: Document, sections: dict) -> set[str]:
+def _insert_content_under_matching_headings(
+    doc: Document,
+    sections: dict,
+    template_heading_map: dict | None = None,
+) -> set[str]:
     """Insert translated section content under heading-like paragraphs."""
     inserted_keys: set[str] = set()
     paragraphs = list(doc.paragraphs)
+    heading_map = _normalise_template_heading_map(template_heading_map)
 
     for paragraph in paragraphs:
-        key = _match_section_key(paragraph.text)
+        key = heading_map.get(_normalise_heading(paragraph.text))
+        if not key:
+            key = _match_section_key(paragraph.text)
         if not key or key in inserted_keys:
             continue
 
@@ -617,6 +776,25 @@ def _append_missing_sections(doc: Document, sections: dict, inserted_keys: set[s
             _add_text_paragraph(doc, value)
         else:
             _add_text_paragraph(doc, str(value))
+
+
+def _normalise_template_heading_map(template_heading_map: dict | None) -> dict:
+    """
+    Normalise heading map from translation output to:
+        {normalised_heading_text: COA_FIELD_KEY}
+    """
+    normalised: dict = {}
+    if not isinstance(template_heading_map, dict):
+        return normalised
+
+    for heading, key in template_heading_map.items():
+        if not heading or key not in COA_FIELD_KEYS:
+            continue
+        heading_norm = _normalise_heading(str(heading))
+        if heading_norm:
+            normalised[heading_norm] = key
+
+    return normalised
 
 
 def _match_section_key(text: str) -> str | None:
