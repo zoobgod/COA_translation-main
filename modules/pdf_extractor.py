@@ -12,6 +12,8 @@ binarization, deskew) for improved accuracy on scanned COA documents.
 
 import io
 import logging
+import os
+import tempfile
 from typing import Optional
 
 import pdfplumber
@@ -29,6 +31,20 @@ try:
     HAS_PDFIUM = True
 except (ImportError, OSError):
     HAS_PDFIUM = False
+
+try:
+    import camelot
+
+    HAS_CAMELOT = True
+except (ImportError, OSError):
+    HAS_CAMELOT = False
+
+try:
+    import tabula
+
+    HAS_TABULA = True
+except (ImportError, OSError):
+    HAS_TABULA = False
 
 try:
     import pytesseract
@@ -449,9 +465,20 @@ def extract_text_from_pdf(pdf_bytes: bytes) -> dict:
 
     if candidates:
         best = max(candidates, key=lambda item: item["score"])
+        method = best["method"]
+        text = best["text"]
+        advanced_tables = _extract_advanced_table_text(pdf_bytes)
+        if advanced_tables:
+            text += (
+                "\n\n--- Advanced Extracted Tables "
+                "(Camelot/Tabula) ---\n"
+                + advanced_tables
+            )
+            method += " + advanced tables"
+
         return {
-            "text": best["text"],
-            "method": best["method"],
+            "text": text,
+            "method": method,
             "success": True,
             "page_count": best["page_count"] or page_count,
         }
@@ -522,6 +549,8 @@ def get_extraction_capabilities() -> dict:
         "has_ocr": HAS_OCR,
         "has_fitz": HAS_FITZ,
         "has_pdfium": HAS_PDFIUM,
+        "has_camelot": HAS_CAMELOT,
+        "has_tabula": HAS_TABULA,
     }
 
 
@@ -541,3 +570,108 @@ def _format_table(table: list) -> str:
             rows.append(" | ".join(cells))
 
     return "\n".join(rows) if rows else ""
+
+
+def _extract_advanced_table_text(pdf_bytes: bytes) -> str:
+    """
+    Try advanced table extraction (Camelot/Tabula) and return deduplicated
+    pipe-delimited tables as text.
+    """
+    if not (HAS_CAMELOT or HAS_TABULA):
+        return ""
+
+    table_texts: list[str] = []
+    temp_path = None
+
+    try:
+        with tempfile.NamedTemporaryFile(
+            suffix=".pdf",
+            delete=False,
+        ) as tmp:
+            tmp.write(pdf_bytes)
+            temp_path = tmp.name
+
+        if HAS_CAMELOT:
+            table_texts.extend(_extract_tables_with_camelot(temp_path))
+        if HAS_TABULA:
+            table_texts.extend(_extract_tables_with_tabula(temp_path))
+    except Exception as e:
+        logger.warning("Advanced table extraction failed: %s", e)
+    finally:
+        if temp_path and os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
+
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for text in table_texts:
+        norm = " ".join(text.split())
+        if not norm or norm in seen:
+            continue
+        seen.add(norm)
+        deduped.append(text)
+
+    return "\n\n".join(deduped)
+
+
+def _extract_tables_with_camelot(pdf_path: str) -> list[str]:
+    """Extract tables via camelot (both lattice and stream modes)."""
+    results: list[str] = []
+    for flavor in ("lattice", "stream"):
+        try:
+            tables = camelot.read_pdf(
+                pdf_path,
+                pages="all",
+                flavor=flavor,
+            )
+            for i, table in enumerate(tables):
+                if i >= 12:
+                    break
+                df = table.df
+                if df is None or df.empty:
+                    continue
+                rows = []
+                for _, row in df.fillna("").iterrows():
+                    cells = [str(cell).strip() for cell in row.tolist()]
+                    if any(cells):
+                        rows.append(" | ".join(cells))
+                if rows:
+                    results.append(
+                        f"[Camelot-{flavor} table]\n" + "\n".join(rows)
+                    )
+        except Exception as e:
+            logger.info("Camelot (%s) unavailable for this PDF: %s", flavor, e)
+    return results
+
+
+def _extract_tables_with_tabula(pdf_path: str) -> list[str]:
+    """Extract tables via tabula-py."""
+    results: list[str] = []
+    try:
+        dataframes = tabula.read_pdf(
+            pdf_path,
+            pages="all",
+            multiple_tables=True,
+            guess=True,
+            pandas_options={"dtype": str},
+        )
+    except Exception as e:
+        logger.info("Tabula unavailable for this PDF: %s", e)
+        return results
+
+    for i, df in enumerate(dataframes):
+        if i >= 12:
+            break
+        if df is None or df.empty:
+            continue
+        rows = []
+        for _, row in df.fillna("").iterrows():
+            cells = [str(cell).strip() for cell in row.tolist()]
+            if any(cells):
+                rows.append(" | ".join(cells))
+        if rows:
+            results.append("[Tabula table]\n" + "\n".join(rows))
+
+    return results

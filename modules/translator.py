@@ -437,6 +437,11 @@ def _create_chat_completion(client: OpenAI, model: str, **kwargs) -> dict:
         return _call_chat(payload)
     except Exception as e:
         message = str(e).lower()
+        if "temperature" in payload and _is_temperature_error(message):
+            logger.warning("temperature unsupported, retrying without it: %s", e)
+            reduced = dict(payload)
+            reduced.pop("temperature", None)
+            return _call_chat(reduced)
         if "response_format" in payload and "response_format" in message:
             logger.warning("response_format unsupported, retrying without it: %s", e)
             reduced = dict(payload)
@@ -445,6 +450,13 @@ def _create_chat_completion(client: OpenAI, model: str, **kwargs) -> dict:
                 return _call_chat(reduced)
             except Exception as inner:
                 inner_message = str(inner).lower()
+                if "temperature" in reduced and _is_temperature_error(inner_message):
+                    reduced2 = dict(reduced)
+                    reduced2.pop("temperature", None)
+                    try:
+                        return _call_chat(reduced2)
+                    except Exception as inner2:
+                        inner_message = str(inner2).lower()
                 if _should_try_responses_fallback(model, inner_message):
                     return _create_with_responses_api(client, model, reduced)
                 raise
@@ -490,7 +502,15 @@ def _create_with_responses_api(client: OpenAI, model: str, payload: dict) -> dic
         req["max_output_tokens"] = payload["max_tokens"]
 
     # Keep prompt-level JSON constraints; omit chat-only response_format here.
-    response = client.responses.create(**req)
+    try:
+        response = client.responses.create(**req)
+    except Exception as e:
+        if "temperature" in req and _is_temperature_error(str(e).lower()):
+            req2 = dict(req)
+            req2.pop("temperature", None)
+            response = client.responses.create(**req2)
+        else:
+            raise
     content = getattr(response, "output_text", "") or ""
     finish = getattr(response, "status", None) or "stop"
     return {"content": content, "finish_reason": finish}
@@ -500,6 +520,13 @@ def _uses_completion_token_param(model: str) -> bool:
     """Models that typically expect max_completion_tokens."""
     m = (model or "").lower()
     return m.startswith("o") or m.startswith("gpt-5")
+
+
+def _is_temperature_error(message: str) -> bool:
+    return (
+        "temperature" in message
+        and ("not supported" in message or "unsupported" in message)
+    )
 
 
 def _build_template_instruction(template_hints: Optional[dict]) -> str:

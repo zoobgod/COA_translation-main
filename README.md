@@ -5,13 +5,14 @@ Streamlit application that translates pharmaceutical Certificate of Analysis (CO
 ## Features
 
 - **PDF + Image Upload** — Upload COA documents as PDF or image files (`.png`, `.jpg`, `.tiff`, etc.)
-- **Multi-method text extraction** — Uses pdfplumber (primary), PyMuPDF/pdfium (fallback renderers), and OCR via pytesseract (for scanned documents)
+- **Multi-method text extraction** — Uses pdfplumber (primary), PyMuPDF/pdfium (fallback renderers), OCR via pytesseract, plus optional Camelot/Tabula table extraction for COA result tables
 - **Optimized OCR pipeline** — Image preprocessing (grayscale, autocontrast, sharpening, binarization) with tuned Tesseract settings (PSM 6 for structured documents) and pdfplumber-based rendering fallback when PyMuPDF is unavailable
 - **AI Translation with pharma glossary** — Translates via OpenAI models with a 200+ term pharmaceutical glossary enforcing standard Russian pharmaceutical terminology
 - **Structured JSON translation** — OpenAI outputs a structured JSON response mapping content to predefined COA sections, ensuring consistent document layout
 - **Fixed-structure Word output** — Every output document follows the same 10-section predefined structure regardless of the original PDF layout
 - **Custom template support** — Optionally upload your own `.docx` template with Jinja2 placeholders for custom formatting
 - **Template-aware translation pass** — If a template is uploaded, placeholder/heading hints are included in the same translation request to improve template population
+- **Bilingual review view** — Side-by-side English extracted text and Russian translation with line-by-line preview diff before download
 - **Download** — One-click download of the translated document
 
 ## Setup
@@ -44,6 +45,8 @@ This repo includes `packages.txt` for apt-level dependencies used by OCR:
 
 - `tesseract-ocr`
 - `tesseract-ocr-eng`
+- `ghostscript` (Camelot)
+- `default-jre-headless` (Tabula)
 
 When deployed from GitHub to Streamlit Community Cloud, these packages are
 installed automatically before Python dependencies from `requirements.txt`.
@@ -69,7 +72,7 @@ Then open the URL shown in the terminal (typically `http://localhost:8501`).
 ## Usage
 
 1. Enter your OpenAI API key in the sidebar
-2. Select a translation model (supports advanced model IDs and custom model input)
+2. Select a translation model (stable presets + custom model input)
 3. (Optional) Upload a custom `.docx` structure template in the sidebar
 4. Upload a COA PDF or image file
 5. Review the extracted text
@@ -133,6 +136,7 @@ The OCR system is designed for scanned pharmaceutical COA documents:
 3. **Tesseract OCR** — PSM 6 (single uniform block, good for forms/tables), OEM 3 (LSTM engine)
 4. **Quality gate** — Pages with fewer than 10 alphanumeric characters are rejected
 5. **Dual-pass** — If preprocessed OCR fails, a second pass without preprocessing is attempted
+6. **Advanced table extraction (optional)** — Camelot/Tabula attempt to recover dense COA tables and append them to extracted text for better translation completeness
 
 ## Glossary
 

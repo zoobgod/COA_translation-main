@@ -6,6 +6,8 @@ translate it to Russian using OpenAI with a pharmaceutical glossary,
 and download the result as a fixed-structure Word document.
 """
 
+import difflib
+
 import streamlit as st
 
 from modules.pdf_extractor import (
@@ -69,9 +71,6 @@ with st.sidebar:
     model_choice = st.selectbox(
         "Translation Model",
         options=[
-            "gpt-5",
-            "gpt-5-mini",
-            "o3",
             "gpt-4.1",
             "gpt-4o",
             "gpt-4o-mini",
@@ -138,6 +137,11 @@ if not caps["has_ocr"]:
     st.warning(
         "OCR engine is not available in this environment. Scanned PDFs/images "
         "will not be readable until Tesseract OCR is installed."
+    )
+if not (caps.get("has_camelot") or caps.get("has_tabula")):
+    st.caption(
+        "Advanced table extractors (Camelot/Tabula) are unavailable in this "
+        "runtime; baseline extraction will still work."
     )
 
 uploaded_file = st.file_uploader(
@@ -288,6 +292,51 @@ if uploaded_file is not None:
                             result["translated_text"],
                             height=420,
                             disabled=True,
+                        )
+
+                    st.subheader("3.5 Bilingual Review")
+                    left_col, right_col = st.columns(2)
+                    with left_col:
+                        st.text_area(
+                            "English source (extracted)",
+                            extraction["text"],
+                            height=320,
+                            disabled=True,
+                        )
+                    with right_col:
+                        st.text_area(
+                            "Russian translation",
+                            result["translated_text"],
+                            height=320,
+                            disabled=True,
+                        )
+
+                    with st.expander("Line-by-line bilingual diff (preview)"):
+                        max_lines = 250
+                        en_lines = extraction["text"].splitlines()[:max_lines]
+                        ru_lines = result["translated_text"].splitlines()[:max_lines]
+                        diff_html = difflib.HtmlDiff(
+                            wrapcolumn=70
+                        ).make_table(
+                            en_lines,
+                            ru_lines,
+                            fromdesc="English Source",
+                            todesc="Russian Translation",
+                            context=False,
+                            numlines=0,
+                        )
+                        st.caption(
+                            "Showing first 250 lines for performance."
+                        )
+                        st.markdown(
+                            "<style>"
+                            ".diff {font-size: 12px; width: 100%;}"
+                            ".diff_header {background: #f1f5f9;}"
+                            ".diff_add {background: #e8f5e9;}"
+                            ".diff_sub {background: #ffebee;}"
+                            "</style>"
+                            + diff_html,
+                            unsafe_allow_html=True,
                         )
 
                     # ------------------------------------------------------
