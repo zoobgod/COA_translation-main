@@ -1,0 +1,303 @@
+"""
+Pharmaceutical COA Translator — Streamlit Application
+
+Upload a pharmaceutical Certificate of Analysis (COA) in PDF format,
+translate it to Russian using OpenAI with a pharmaceutical glossary,
+and download the result as a fixed-structure Word document.
+"""
+
+import streamlit as st
+
+from modules.pdf_extractor import extract_text_from_pdf
+from modules.translator import translate_text_structured
+from modules.doc_generator import generate_structured_doc
+
+# ---------------------------------------------------------------------------
+# Page config
+# ---------------------------------------------------------------------------
+st.set_page_config(
+    page_title="COA Translator — EN → RU",
+    page_icon="💊",
+    layout="centered",
+)
+
+# ---------------------------------------------------------------------------
+# Custom CSS
+# ---------------------------------------------------------------------------
+st.markdown(
+    """
+    <style>
+    .main-header {
+        text-align: center;
+        padding: 1rem 0;
+    }
+    .main-header h1 {
+        color: #1E88E5;
+        font-size: 2rem;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+# ---------------------------------------------------------------------------
+# Header
+# ---------------------------------------------------------------------------
+st.markdown(
+    '<div class="main-header">'
+    "<h1>Pharmaceutical COA Translator</h1>"
+    "<p>English → Russian | Certificate of Analysis</p>"
+    "</div>",
+    unsafe_allow_html=True,
+)
+
+# ---------------------------------------------------------------------------
+# Sidebar — Settings
+# ---------------------------------------------------------------------------
+with st.sidebar:
+    st.header("Settings")
+
+    api_key = st.text_input(
+        "OpenAI API Key",
+        type="password",
+        help="Enter your OpenAI API key. Used only for the current session.",
+    )
+
+    model_choice = st.selectbox(
+        "Translation Model",
+        options=["gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "gpt-3.5-turbo"],
+        index=0,
+        help="gpt-4o recommended for best quality pharmaceutical translations.",
+    )
+
+    st.divider()
+
+    st.subheader("Word Template (optional)")
+    user_template = st.file_uploader(
+        "Upload a .docx structure template",
+        type=["docx"],
+        help=(
+            "Upload your own Word template with Jinja2 placeholders "
+            "(e.g. {{ product_name }}, {{ test_results }}). "
+            "If not provided, the built-in fixed COA structure is used.\n\n"
+            "**Available placeholders:** document_title, company_info, "
+            "product_name, product_details, batch_info, storage_conditions, "
+            "test_results, conclusion, signatures, notes, "
+            "original_filename, translation_date, model_used, extraction_method"
+        ),
+    )
+
+    st.divider()
+    st.markdown("**About**")
+    st.markdown(
+        "This app translates pharmaceutical Certificate of Analysis (COA) "
+        "documents from English to Russian using AI with a specialized "
+        "pharmaceutical glossary."
+    )
+    st.markdown(
+        "**Features:**\n"
+        "- Multi-method PDF extraction\n"
+        "- OCR with image preprocessing\n"
+        "- 200+ pharma term glossary\n"
+        "- Fixed-structure Word output\n"
+        "- Custom template support"
+    )
+
+# ---------------------------------------------------------------------------
+# Main content
+# ---------------------------------------------------------------------------
+st.subheader("1. Upload COA PDF")
+
+uploaded_file = st.file_uploader(
+    "Upload a Certificate of Analysis in PDF format",
+    type=["pdf"],
+    help="Supports text-based and scanned (OCR) PDFs up to 50 MB.",
+)
+
+if uploaded_file is not None:
+    pdf_bytes = uploaded_file.getvalue()
+    file_size_mb = len(pdf_bytes) / (1024 * 1024)
+    file_signature = (uploaded_file.name, len(pdf_bytes))
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.metric("File", uploaded_file.name)
+    with col2:
+        st.metric("Size", f"{file_size_mb:.2f} MB")
+
+    # ------------------------------------------------------------------
+    # Step 2: Extract text
+    # ------------------------------------------------------------------
+    st.subheader("2. Extract Text")
+
+    if (
+        "extraction_result" not in st.session_state
+        or st.session_state.get("last_file_signature") != file_signature
+    ):
+        with st.spinner("Extracting text from PDF..."):
+            extraction = extract_text_from_pdf(pdf_bytes)
+            st.session_state["extraction_result"] = extraction
+            st.session_state["last_file_signature"] = file_signature
+            # Clear stale downstream state
+            st.session_state.pop("translation_result", None)
+            st.session_state.pop("doc_bytes", None)
+    else:
+        extraction = st.session_state["extraction_result"]
+
+    if extraction["success"]:
+        st.success(
+            f"Text extracted using **{extraction['method']}** "
+            f"({extraction['page_count']} page(s), "
+            f"{len(extraction['text']):,} characters)"
+        )
+
+        with st.expander("Preview extracted text", expanded=False):
+            st.text_area(
+                "Extracted text (full)",
+                extraction["text"],
+                height=420,
+                disabled=True,
+            )
+
+        # ------------------------------------------------------------------
+        # Step 3: Translate
+        # ------------------------------------------------------------------
+        st.subheader("3. Translate to Russian")
+
+        if not api_key:
+            st.warning(
+                "Please enter your OpenAI API key in the sidebar to proceed."
+            )
+        else:
+            translate_btn = st.button(
+                "Translate to Russian",
+                type="primary",
+                use_container_width=True,
+            )
+
+            if translate_btn or st.session_state.get("translation_result"):
+                if translate_btn:
+                    progress_bar = st.progress(0, text="Translating...")
+                    status_text = st.empty()
+
+                    def update_progress(current, total):
+                        pct = min(int(current / total * 100), 100)
+                        progress_bar.progress(
+                            pct,
+                            text=f"Translating step {current}/{total}...",
+                        )
+                        status_text.text(
+                            f"Processing step {current} of {total}"
+                        )
+
+                    with st.spinner("Translating document (structured)..."):
+                        result = translate_text_structured(
+                            text=extraction["text"],
+                            api_key=api_key,
+                            model=model_choice,
+                            progress_callback=update_progress,
+                        )
+
+                    progress_bar.empty()
+                    status_text.empty()
+
+                    st.session_state["translation_result"] = result
+                    # Clear stale doc
+                    st.session_state.pop("doc_bytes", None)
+                else:
+                    result = st.session_state["translation_result"]
+
+                if result["success"]:
+                    st.success(
+                        f"Translation complete! Model: **{result['model_used']}**"
+                    )
+
+                    with st.expander(
+                        "Preview translated text", expanded=False
+                    ):
+                        st.text_area(
+                            "Переведенный текст (полный)",
+                            result["translated_text"],
+                            height=420,
+                            disabled=True,
+                        )
+
+                    # ------------------------------------------------------
+                    # Step 4: Generate & Download Word doc
+                    # ------------------------------------------------------
+                    st.subheader("4. Download Word Document")
+
+                    if "doc_bytes" not in st.session_state or translate_btn:
+                        with st.spinner("Generating Word document..."):
+                            template_bytes = None
+                            if user_template:
+                                template_bytes = user_template.getvalue()
+
+                            doc_bytes = generate_structured_doc(
+                                sections=result.get("sections", {}),
+                                original_filename=uploaded_file.name,
+                                extraction_method=extraction["method"],
+                                model_used=result["model_used"],
+                                user_template_bytes=template_bytes,
+                            )
+                            st.session_state["doc_bytes"] = doc_bytes
+                    else:
+                        doc_bytes = st.session_state["doc_bytes"]
+
+                    base_name = uploaded_file.name.rsplit(".", 1)[0]
+                    output_filename = f"{base_name}_RU.docx"
+
+                    st.download_button(
+                        label="Download Translated COA (.docx)",
+                        data=doc_bytes,
+                        file_name=output_filename,
+                        mime=(
+                            "application/vnd.openxmlformats-officedocument"
+                            ".wordprocessingml.document"
+                        ),
+                        type="primary",
+                        use_container_width=True,
+                    )
+
+                    st.info(
+                        "The document follows a fixed COA structure with "
+                        "predefined sections. We recommend having a "
+                        "pharmaceutical specialist review the translation."
+                    )
+
+                else:
+                    st.error(f"Translation failed: {result['error']}")
+
+                    if "api_key" in str(result["error"]).lower() or "auth" in str(
+                        result["error"]
+                    ).lower():
+                        st.warning(
+                            "This looks like an authentication error. "
+                            "Please check your OpenAI API key."
+                        )
+
+    else:
+        st.error(
+            "Could not extract text from the PDF. "
+            "The file may be corrupted or empty."
+        )
+        st.info(
+            "Tips:\n"
+            "- Ensure the PDF is not password-protected\n"
+            "- Try a different PDF if the file seems corrupted\n"
+            "- For scanned documents, ensure pytesseract and Tesseract "
+            "are installed on the server"
+        )
+
+# ---------------------------------------------------------------------------
+# Footer
+# ---------------------------------------------------------------------------
+st.divider()
+st.markdown(
+    "<div style='text-align: center; color: #888; font-size: 0.8rem;'>"
+    "COA Translator v2.0 | Fixed-structure output | "
+    "Pharmaceutical glossary with 200+ terms | "
+    "Powered by OpenAI"
+    "</div>",
+    unsafe_allow_html=True,
+)
