@@ -56,13 +56,11 @@ def create_template():
     r.font.name = "Times New Roman"
     r.font.color.rgb = RGBColor(100, 100, 100)
 
-    # Metadata
+    # Minimal metadata (optional)
     doc.add_paragraph()
     meta_fields = [
         ("Исходный файл:", "{{ original_filename }}"),
         ("Дата перевода:", "{{ translation_date }}"),
-        ("Модель перевода:", "{{ model_used }}"),
-        ("Метод извлечения:", "{{ extraction_method }}"),
     ]
     for label, placeholder in meta_fields:
         p = doc.add_paragraph()
@@ -105,19 +103,6 @@ def create_template():
     dr2 = div2.add_run("─" * 70)
     dr2.font.size = Pt(7)
     dr2.font.color.rgb = RGBColor(180, 180, 180)
-
-    # Disclaimer
-    disc = doc.add_paragraph()
-    disc.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    disc_run = disc.add_run(
-        "Данный документ является переводом оригинального Сертификата анализа.\n"
-        "Перевод выполнен с использованием искусственного интеллекта с применением\n"
-        "фармацевтического глоссария. Рекомендуется верификация специалистом."
-    )
-    disc_run.font.size = Pt(8)
-    disc_run.font.name = "Times New Roman"
-    disc_run.font.color.rgb = RGBColor(140, 140, 140)
-    disc_run.italic = True
 
     doc.save(TEMPLATE_PATH)
     print(f"Template created at: {TEMPLATE_PATH}")

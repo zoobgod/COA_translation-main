@@ -107,7 +107,7 @@ with st.sidebar:
             "**Available placeholders:** document_title, company_info, "
             "product_name, product_details, batch_info, storage_conditions, "
             "test_results, conclusion, signatures, notes, "
-            "original_filename, translation_date, model_used, extraction_method"
+            "original_filename, translation_date"
         ),
     )
 
@@ -268,6 +268,7 @@ if uploaded_file is not None:
                             model=selected_model,
                             progress_callback=update_progress,
                             template_hints=template_hints,
+                            table_supplement=extraction.get("table_supplement", ""),
                         )
 
                     progress_bar.empty()

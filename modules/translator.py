@@ -57,39 +57,6 @@ first appears.
 table rows, and metadata from the source.
 """
 
-STRUCTURED_SYSTEM_PROMPT = """\
-You are a professional pharmaceutical translator specialising in Certificate \
-of Analysis (COA) documents, English → Russian.
-
-{common_rules}
-
-{glossary_section}
-
-OUTPUT FORMAT — you MUST return **valid JSON only** (no markdown fences, no \
-commentary) with the following keys. Every key must be present; use an empty \
-string "" or empty list [] if the source document does not contain information \
-for that section.
-
-Section definitions:
-{section_descriptions}
-
-JSON schema:
-{{
-{json_keys}
-}}
-
-For "test_results" (the table), return a JSON array of arrays. The first \
-inner array is the header row. Example:
-  "test_results": [
-    ["Испытание", "Метод", "Критерии приемлемости", "Результат"],
-    ["Внешний вид", "Визуальный", "Белый порошок", "Соответствует"],
-    ...
-  ]
-
-For all other keys return a plain Russian-language string.
-Do not omit sections or shorten long tables; preserve full COA content.
-"""
-
 PLAIN_SYSTEM_PROMPT = """\
 You are a professional pharmaceutical translator specialising in translating \
 Certificate of Analysis (COA) documents from English to Russian.
@@ -101,6 +68,35 @@ Certificate of Analysis (COA) documents from English to Russian.
 Output ONLY the translated text — no JSON, no markdown fences, no commentary.
 Preserve the original document layout as closely as possible.
 Preserve any table structure using | as the column delimiter.
+Do not omit any lines, rows, limits, footnotes, or acceptance criteria.
+"""
+
+STRUCTURE_MAPPING_SYSTEM_PROMPT = """\
+You are a pharmaceutical document structuring expert.
+
+You will receive:
+1) A FULL Russian translation of a COA.
+2) Optional supplemental extracted test tables.
+
+Your task is to map content into the predefined JSON structure.
+Do not summarize. Preserve complete test data in "test_results".
+
+OUTPUT FORMAT — return valid JSON only with these keys:
+{{
+{json_keys},
+  "template_fields": {{}},
+  "template_heading_map": {{}}
+}}
+
+Section definitions:
+{section_descriptions}
+
+Rules:
+- Keep all meaningful content.
+- For "test_results" return JSON array of arrays.
+- For text fields return plain strings.
+- If template hints are provided, populate "template_fields" and
+  "template_heading_map" accordingly.
 """
 
 
@@ -110,19 +106,20 @@ def _build_system_prompt(structured: bool) -> str:
     common_rules = _COMMON_RULES
 
     if structured:
-        section_descriptions = get_section_descriptions_for_prompt()
-        json_keys = ",\n".join(f'  "{k}": "..."' for k in COA_FIELD_KEYS)
-        return STRUCTURED_SYSTEM_PROMPT.format(
-            common_rules=common_rules,
-            glossary_section=glossary_section,
-            section_descriptions=section_descriptions,
-            json_keys=json_keys,
-        )
-    else:
-        return PLAIN_SYSTEM_PROMPT.format(
-            common_rules=common_rules,
-            glossary_section=glossary_section,
-        )
+        return _build_structuring_prompt()
+    return PLAIN_SYSTEM_PROMPT.format(
+        common_rules=common_rules,
+        glossary_section=glossary_section,
+    )
+
+
+def _build_structuring_prompt() -> str:
+    section_descriptions = get_section_descriptions_for_prompt()
+    json_keys = ",\n".join(f'  "{k}": "..."' for k in COA_FIELD_KEYS)
+    return STRUCTURE_MAPPING_SYSTEM_PROMPT.format(
+        section_descriptions=section_descriptions,
+        json_keys=json_keys,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -188,6 +185,7 @@ def translate_text_structured(
     model: str = "gpt-4o",
     progress_callback: Optional[callable] = None,
     template_hints: Optional[dict] = None,
+    table_supplement: str = "",
 ) -> dict:
     """
     Translate pharmaceutical COA text and return **structured** output — a
@@ -205,6 +203,7 @@ def translate_text_structured(
         model,
         progress_callback,
         template_hints=template_hints,
+        table_supplement=table_supplement,
     )
 
 
@@ -233,7 +232,8 @@ def _translate_plain(
 
             user_message = (
                 "Translate the following pharmaceutical COA text from English "
-                "to Russian. Output ONLY the translation, nothing else.\n\n"
+                "to Russian. Output ONLY the translation, nothing else. "
+                "Do not omit any lines or table rows.\n\n"
                 + chunk
             )
 
@@ -275,104 +275,62 @@ def _translate_structured(
     model: str,
     progress_callback: Optional[callable],
     template_hints: Optional[dict] = None,
+    table_supplement: str = "",
 ) -> dict:
     if not text.strip():
         return _error_result("No text provided for translation", model)
 
     try:
-        client = OpenAI(api_key=api_key)
-        system_prompt = _build_system_prompt(structured=True)
+        if progress_callback:
+            progress_callback(1, 3)
+
+        # Pass 1: high-fidelity full translation (quality-first).
+        plain_result = _translate_plain(text, api_key, model, None)
+        if not plain_result["success"]:
+            return plain_result
+
+        full_translation = plain_result["translated_text"].strip()
+        if not full_translation:
+            return _error_result("Empty translation result", model)
 
         if progress_callback:
-            progress_callback(1, 2)
+            progress_callback(2, 3)
 
-        user_message = (
-            "Below is the full extracted text of a pharmaceutical Certificate "
-            "of Analysis (COA). Translate it to Russian and map the content "
-            "into the predefined JSON structure described in your instructions. "
-            "Return ONLY valid JSON.\n\n"
-            + text
-        )
-        template_instruction = _build_template_instruction(template_hints)
-        if template_instruction:
-            user_message += "\n\n" + template_instruction
-
-        response = _create_chat_completion(
-            client=client,
-            model=model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_message},
-            ],
-            temperature=0.1,
-            # Encourage the model to produce enough output for the full COA
-            max_tokens=STRUCTURED_MAX_TOKENS,
-            response_format={"type": "json_object"},
-        )
-
-        raw = response["content"]
-        finish_reason = response["finish_reason"] or "stop"
-
-        if progress_callback:
-            progress_callback(2, 2)
-
-        # Parse JSON — strip markdown code fences if the model adds them
-        json_str = raw.strip()
-        if json_str.startswith("```"):
-            # Remove ```json ... ``` wrapper
-            lines = json_str.split("\n")
-            lines = [l for l in lines if not l.strip().startswith("```")]
-            json_str = "\n".join(lines)
-
-        parsed = json.loads(json_str)
-        parsed_dict = parsed if isinstance(parsed, dict) else {}
-        sections = _normalise_sections(parsed_dict)
-        template_fields = _normalise_template_fields(
-            parsed_dict.get("template_fields"),
-            template_hints,
-            sections,
-        )
-        template_heading_map = _normalise_template_heading_map(
-            parsed_dict.get("template_heading_map"),
-            template_hints,
-        )
-
-        # If structured output is likely truncated/incomplete, backfill full
-        # plain translation into notes so no source content is lost.
-        if _needs_plain_backfill(text, sections, finish_reason):
-            logger.warning(
-                "Structured output may be incomplete (finish_reason=%s); "
-                "running plain translation backfill",
-                finish_reason,
+        # Pass 2: map translated content to structured sections.
+        sections, template_fields, template_heading_map, finish_reason = (
+            _structure_translated_content(
+                translated_text=full_translation,
+                table_supplement=table_supplement,
+                api_key=api_key,
+                model=model,
+                template_hints=template_hints,
             )
-            plain_result = _translate_plain(text, api_key, model, None)
-            if plain_result["success"] and plain_result["translated_text"].strip():
-                merged_notes = _merge_notes(
-                    sections.get("notes", ""),
-                    plain_result["translated_text"],
-                )
-                sections["notes"] = merged_notes
-            else:
-                logger.warning("Plain-translation backfill failed")
+        )
+
+        if _needs_plain_backfill(text, sections, finish_reason):
+            sections["notes"] = _merge_notes(sections.get("notes", ""), full_translation)
+
+        if progress_callback:
+            progress_callback(3, 3)
 
         return {
             "sections": sections,
             "template_fields": template_fields,
             "template_heading_map": template_heading_map,
-            "translated_text": _build_preview_from_sections(sections),
+            # Show full translation in UI preview (not only section summary)
+            "translated_text": full_translation,
             "success": True,
             "error": None,
             "model_used": model,
-            "chunks_translated": 1,
+            "chunks_translated": plain_result.get("chunks_translated", 1),
         }
 
-    except json.JSONDecodeError as e:
-        logger.error(f"Failed to parse structured translation JSON: {e}")
-        # Fall back to plain translation
-        logger.info("Falling back to plain translation mode")
-        plain_result = _translate_plain(text, api_key, model, progress_callback)
+    except Exception as e:
+        logger.error(f"Structured translation failed: {e}")
+
+        # Final fallback: still provide clean full translation for end users.
+        plain_result = _translate_plain(text, api_key, model, None)
         if plain_result["success"]:
-            # Build a best-effort sections dict with all content in notes
             sections = {k: "" for k in COA_FIELD_KEYS}
             sections["notes"] = plain_result["translated_text"]
             plain_result["sections"] = sections
@@ -385,11 +343,70 @@ def _translate_structured(
                 None,
                 template_hints,
             )
-        return plain_result
+            return plain_result
 
-    except Exception as e:
-        logger.error(f"Structured translation failed: {e}")
         return _error_result(str(e), model)
+
+
+def _structure_translated_content(
+    translated_text: str,
+    table_supplement: str,
+    api_key: str,
+    model: str,
+    template_hints: Optional[dict],
+) -> tuple[dict, dict, dict, str]:
+    """
+    Map already-translated Russian COA text into structured sections.
+    Returns (sections, template_fields, template_heading_map, finish_reason).
+    """
+    client = OpenAI(api_key=api_key)
+    system_prompt = _build_structuring_prompt()
+
+    user_message = (
+        "Below is the FULL Russian translation of a COA. "
+        "Map it to the requested JSON structure.\n\n"
+        "=== FULL RUSSIAN TRANSLATION ===\n"
+        f"{translated_text}"
+    )
+
+    if table_supplement.strip():
+        user_message += (
+            "\n\n=== SUPPLEMENTAL EXTRACTED TABLES (source-side recovery) ===\n"
+            f"{table_supplement}"
+            "\nUse this supplement primarily to complete test_results rows."
+        )
+
+    template_instruction = _build_template_instruction(template_hints)
+    if template_instruction:
+        user_message += "\n\n" + template_instruction
+
+    response = _create_chat_completion(
+        client=client,
+        model=model,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_message},
+        ],
+        temperature=0.1,
+        max_tokens=STRUCTURED_MAX_TOKENS,
+        response_format={"type": "json_object"},
+    )
+
+    finish_reason = response.get("finish_reason") or "stop"
+    parsed = json.loads(_strip_json_fences(response.get("content", "")))
+    parsed_dict = parsed if isinstance(parsed, dict) else {}
+
+    sections = _normalise_sections(parsed_dict)
+    template_fields = _normalise_template_fields(
+        parsed_dict.get("template_fields"),
+        template_hints,
+        sections,
+    )
+    template_heading_map = _normalise_template_heading_map(
+        parsed_dict.get("template_heading_map"),
+        template_hints,
+    )
+    return sections, template_fields, template_heading_map, finish_reason
 
 
 # ---------------------------------------------------------------------------
@@ -407,6 +424,16 @@ def _error_result(error: str, model: str) -> dict:
         "model_used": model,
         "chunks_translated": 0,
     }
+
+
+def _strip_json_fences(raw: str) -> str:
+    """Remove markdown code fences if present."""
+    text = (raw or "").strip()
+    if text.startswith("```"):
+        lines = text.splitlines()
+        lines = [line for line in lines if not line.strip().startswith("```")]
+        return "\n".join(lines).strip()
+    return text
 
 
 def _create_chat_completion(client: OpenAI, model: str, **kwargs) -> dict:

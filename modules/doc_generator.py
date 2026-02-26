@@ -336,9 +336,6 @@ def _generate_fixed_structure(
     # -- Title block -------------------------------------------------------
     _add_title_block(doc)
 
-    # -- Metadata block ----------------------------------------------------
-    _add_metadata_block(doc, original_filename, extraction_method, model_used)
-
     # -- Horizontal rule ---------------------------------------------------
     _add_horizontal_rule(doc)
 
@@ -366,9 +363,6 @@ def _generate_fixed_structure(
 
     # -- Footer rule -------------------------------------------------------
     _add_horizontal_rule(doc)
-
-    # -- Disclaimer --------------------------------------------------------
-    _add_disclaimer(doc)
 
     # -- Serialise ---------------------------------------------------------
     buf = io.BytesIO()
@@ -398,33 +392,6 @@ def _add_title_block(doc: Document):
     r.font.size = Pt(11)
     r.font.name = "Times New Roman"
     r.font.color.rgb = RGBColor(100, 100, 100)
-
-
-def _add_metadata_block(
-    doc: Document,
-    original_filename: str,
-    extraction_method: str,
-    model_used: str,
-):
-    items = [
-        ("Исходный файл:", original_filename),
-        ("Дата перевода:", datetime.now().strftime("%d.%m.%Y")),
-        ("Модель перевода:", model_used),
-        ("Метод извлечения:", extraction_method),
-    ]
-    for label, value in items:
-        p = doc.add_paragraph()
-        p.paragraph_format.space_before = Pt(0)
-        p.paragraph_format.space_after = Pt(1)
-        lr = p.add_run(f"{label} ")
-        lr.bold = True
-        lr.font.size = Pt(9)
-        lr.font.name = "Times New Roman"
-        lr.font.color.rgb = RGBColor(80, 80, 80)
-        vr = p.add_run(value)
-        vr.font.size = Pt(9)
-        vr.font.name = "Times New Roman"
-        vr.font.color.rgb = RGBColor(80, 80, 80)
 
 
 def _add_horizontal_rule(doc: Document):
@@ -507,21 +474,6 @@ def _add_results_table(doc: Document, rows: list[list]):
     doc.add_paragraph()
 
 
-def _add_disclaimer(doc: Document):
-    p = doc.add_paragraph()
-    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    p.paragraph_format.space_before = Pt(4)
-    run = p.add_run(
-        "Данный документ является переводом оригинального Сертификата анализа.\n"
-        "Перевод выполнен с использованием искусственного интеллекта с применением\n"
-        "фармацевтического глоссария. Рекомендуется верификация специалистом."
-    )
-    run.font.size = Pt(8)
-    run.font.name = "Times New Roman"
-    run.font.color.rgb = RGBColor(140, 140, 140)
-    run.italic = True
-
-
 def _table_to_text(rows: list[list]) -> str:
     """Convert a table (list of rows) to pipe-delimited text."""
     lines = []
@@ -560,8 +512,8 @@ def _build_template_context(
     context.update({
         "original_filename": original_filename,
         "translation_date": datetime.now().strftime("%d.%m.%Y"),
-        "model_used": model_used,
-        "extraction_method": extraction_method,
+        "model_used": "",
+        "extraction_method": "",
     })
 
     if isinstance(template_fields, dict):
@@ -696,10 +648,6 @@ def _inject_translation_into_template(
         template_heading_map=template_heading_map,
     )
     _append_missing_sections(doc, sections, inserted_keys)
-
-    # Ensure metadata is always present in fallback mode.
-    _add_horizontal_rule(doc)
-    _add_metadata_block(doc, original_filename, extraction_method, model_used)
 
     buf = io.BytesIO()
     doc.save(buf)

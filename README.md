@@ -13,6 +13,7 @@ Streamlit application that translates pharmaceutical Certificate of Analysis (CO
 - **Custom template support** — Optionally upload your own `.docx` template with Jinja2 placeholders for custom formatting
 - **Template-aware translation pass** — If a template is uploaded, placeholder/heading hints are included in the same translation request to improve template population
 - **Bilingual review view** — Side-by-side English extracted text and Russian translation with line-by-line preview diff before download
+- **Clean professional output** — Generated files omit AI/model/extraction disclaimers to keep final COA documents clean
 - **Download** — One-click download of the translated document
 
 ## Setup
@@ -105,8 +106,6 @@ Upload a `.docx` file containing Jinja2 placeholders (e.g. `{{ product_name }}`,
 - All 10 section keys from the table above
 - `original_filename` — source PDF filename
 - `translation_date` — date of translation
-- `model_used` — OpenAI model used
-- `extraction_method` — PDF extraction method used
 
 ## Project Structure
 

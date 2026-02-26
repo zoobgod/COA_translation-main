@@ -349,11 +349,7 @@ def _ocr_images(
     for i, image in enumerate(images):
         try:
             working_image = _preprocess_image_for_ocr(image) if preprocess else image
-            page_text = pytesseract.image_to_string(
-                working_image,
-                lang="eng",
-                config=tess_config,
-            )
+            page_text = _extract_best_ocr_text(working_image, fallback_config=tess_config)
             alnum_count = sum(1 for ch in page_text if ch.isalnum())
             if alnum_count < 10:
                 logger.info(
@@ -370,6 +366,61 @@ def _ocr_images(
 
     result = "\n\n".join(text_parts).strip()
     return (result if result else None), page_count
+
+
+def _extract_best_ocr_text(image: "Image.Image", fallback_config: str) -> str:
+    """
+    Run OCR with multiple page-segmentation modes and choose the best result.
+    """
+    configs = [
+        fallback_config,
+        "--psm 4 --oem 3",
+        "--psm 11 --oem 3",
+    ]
+    best_text = ""
+    best_score = -1.0
+
+    for config in configs:
+        try:
+            text = pytesseract.image_to_string(image, lang="eng", config=config)
+        except Exception:
+            continue
+
+        alnum = sum(1 for ch in text if ch.isalnum())
+        confidence = _estimate_ocr_confidence(image, config)
+        score = alnum + (2.0 * confidence)
+
+        if score > best_score:
+            best_score = score
+            best_text = text
+
+    return best_text
+
+
+def _estimate_ocr_confidence(image: "Image.Image", config: str) -> float:
+    """Estimate OCR confidence via image_to_data, if available."""
+    try:
+        output = pytesseract.image_to_data(
+            image,
+            lang="eng",
+            config=config,
+            output_type=pytesseract.Output.DICT,
+        )
+    except Exception:
+        return 0.0
+
+    confs = []
+    for raw_conf in output.get("conf", []):
+        try:
+            conf = float(raw_conf)
+        except (TypeError, ValueError):
+            continue
+        if conf >= 0:
+            confs.append(conf)
+
+    if not confs:
+        return 0.0
+    return sum(confs) / len(confs)
 
 
 # ---------------------------------------------------------------------------
@@ -467,13 +518,11 @@ def extract_text_from_pdf(pdf_bytes: bytes) -> dict:
         best = max(candidates, key=lambda item: item["score"])
         method = best["method"]
         text = best["text"]
-        advanced_tables = _extract_advanced_table_text(pdf_bytes)
+        advanced_tables = _extract_advanced_table_text(
+            pdf_bytes,
+            existing_text=text,
+        )
         if advanced_tables:
-            text += (
-                "\n\n--- Advanced Extracted Tables "
-                "(Camelot/Tabula) ---\n"
-                + advanced_tables
-            )
             method += " + advanced tables"
 
         return {
@@ -481,6 +530,7 @@ def extract_text_from_pdf(pdf_bytes: bytes) -> dict:
             "method": method,
             "success": True,
             "page_count": best["page_count"] or page_count,
+            "table_supplement": advanced_tables,
         }
 
     # Last-resort fallback: sometimes users upload files labeled as .pdf that
@@ -496,6 +546,7 @@ def extract_text_from_pdf(pdf_bytes: bytes) -> dict:
                 "method": "Image OCR fallback",
                 "success": True,
                 "page_count": image_pages or page_count or 1,
+                "table_supplement": "",
             }
 
     return {
@@ -503,6 +554,7 @@ def extract_text_from_pdf(pdf_bytes: bytes) -> dict:
         "method": "none",
         "success": False,
         "page_count": page_count,
+        "table_supplement": "",
     }
 
 
@@ -524,6 +576,7 @@ def extract_text_from_upload(file_bytes: bytes, filename: str = "") -> dict:
             "method": "Image OCR",
             "success": True,
             "page_count": pages or 1,
+            "table_supplement": "",
         }
 
     text, pages = extract_text_from_image_bytes(file_bytes, preprocess=False)
@@ -533,6 +586,7 @@ def extract_text_from_upload(file_bytes: bytes, filename: str = "") -> dict:
             "method": "Image OCR (no preprocessing)",
             "success": True,
             "page_count": pages or 1,
+            "table_supplement": "",
         }
 
     return {
@@ -540,6 +594,7 @@ def extract_text_from_upload(file_bytes: bytes, filename: str = "") -> dict:
         "method": "none",
         "success": False,
         "page_count": pages or 0,
+        "table_supplement": "",
     }
 
 
@@ -572,7 +627,7 @@ def _format_table(table: list) -> str:
     return "\n".join(rows) if rows else ""
 
 
-def _extract_advanced_table_text(pdf_bytes: bytes) -> str:
+def _extract_advanced_table_text(pdf_bytes: bytes, existing_text: str = "") -> str:
     """
     Try advanced table extraction (Camelot/Tabula) and return deduplicated
     pipe-delimited tables as text.
@@ -604,11 +659,19 @@ def _extract_advanced_table_text(pdf_bytes: bytes) -> str:
             except OSError:
                 pass
 
+    existing_lines = {
+        _normalise_line_for_dedup(line)
+        for line in existing_text.splitlines()
+        if line.strip()
+    }
+
     deduped: list[str] = []
     seen: set[str] = set()
     for text in table_texts:
-        norm = " ".join(text.split())
+        norm = _normalise_line_for_dedup(text)
         if not norm or norm in seen:
+            continue
+        if norm in existing_lines:
             continue
         seen.add(norm)
         deduped.append(text)
@@ -675,3 +738,7 @@ def _extract_tables_with_tabula(pdf_path: str) -> list[str]:
             results.append("[Tabula table]\n" + "\n".join(rows))
 
     return results
+
+
+def _normalise_line_for_dedup(text: str) -> str:
+    return " ".join(text.lower().split())
