@@ -1,4 +1,12 @@
-import { FormEvent, Fragment, useEffect, useMemo, useState } from "react";
+import {
+  CSSProperties,
+  FormEvent,
+  Fragment,
+  ReactNode,
+  useEffect,
+  useMemo,
+  useState,
+} from "react";
 
 type Capabilities = {
   has_ocr: boolean;
@@ -93,6 +101,85 @@ function StepHeader({ step, title, subtitle }: { step: string; title: string; su
   );
 }
 
+function SpotlightCard({
+  children,
+  className = "",
+  delay = 0,
+}: {
+  children: ReactNode;
+  className?: string;
+  delay?: number;
+}) {
+  const style = {
+    ["--reveal-delay" as string]: `${delay}ms`,
+  } as CSSProperties;
+
+  const handleMove = (event: React.MouseEvent<HTMLDivElement>) => {
+    const el = event.currentTarget;
+    const rect = el.getBoundingClientRect();
+    const x = event.clientX - rect.left;
+    const y = event.clientY - rect.top;
+    const px = (x / rect.width) * 100;
+    const py = (y / rect.height) * 100;
+    const dx = x / rect.width - 0.5;
+    const dy = y / rect.height - 0.5;
+
+    el.style.setProperty("--mx", `${px}%`);
+    el.style.setProperty("--my", `${py}%`);
+    el.style.setProperty("--spot-opacity", "1");
+    el.style.setProperty("--rx", `${-dy * 6}deg`);
+    el.style.setProperty("--ry", `${dx * 6}deg`);
+  };
+
+  const handleEnter = (event: React.MouseEvent<HTMLDivElement>) => {
+    event.currentTarget.style.setProperty("--spot-opacity", "0.92");
+  };
+
+  const handleLeave = (event: React.MouseEvent<HTMLDivElement>) => {
+    const el = event.currentTarget;
+    el.style.setProperty("--spot-opacity", "0");
+    el.style.setProperty("--rx", "0deg");
+    el.style.setProperty("--ry", "0deg");
+  };
+
+  return (
+    <div
+      className={`card spotlight-card reveal ${className}`}
+      style={style}
+      onMouseMove={handleMove}
+      onMouseEnter={handleEnter}
+      onMouseLeave={handleLeave}
+    >
+      {children}
+    </div>
+  );
+}
+
+async function getErrorMessage(response: Response, fallback: string): Promise<string> {
+  try {
+    const json = (await response.json()) as { detail?: string; error?: string };
+    if (typeof json?.detail === "string" && json.detail.trim()) {
+      return json.detail;
+    }
+    if (typeof json?.error === "string" && json.error.trim()) {
+      return json.error;
+    }
+  } catch {
+    // ignore json parse failures
+  }
+
+  try {
+    const text = await response.text();
+    if (text.trim()) {
+      return text;
+    }
+  } catch {
+    // ignore text parse failures
+  }
+
+  return fallback;
+}
+
 export default function App() {
   const [apiKey, setApiKey] = useState("");
   const [modelChoice, setModelChoice] = useState("gpt-4.1");
@@ -167,6 +254,11 @@ export default function App() {
         method: "POST",
         body: formData,
       });
+
+      if (!response.ok) {
+        throw new Error(await getErrorMessage(response, "Text extraction failed."));
+      }
+
       const data = (await response.json()) as ExtractionResult;
 
       setExtraction(data);
@@ -213,6 +305,10 @@ export default function App() {
         }),
       });
 
+      if (!response.ok) {
+        throw new Error(await getErrorMessage(response, "Translation failed."));
+      }
+
       const data = (await response.json()) as TranslationResult;
       setTranslation(data);
       if (!data.success) {
@@ -255,8 +351,7 @@ export default function App() {
       });
 
       if (!response.ok) {
-        const text = await response.text();
-        throw new Error(text || "Document generation failed.");
+        throw new Error(await getErrorMessage(response, "Document generation failed."));
       }
 
       const blob = await response.blob();
@@ -289,7 +384,7 @@ export default function App() {
       </div>
 
       <main className="mx-auto max-w-[1220px] px-4 py-6 md:px-8 md:py-10">
-        <header className="card p-6 md:p-8">
+        <SpotlightCard className="p-6 md:p-8" delay={20}>
           <span className="inline-flex rounded-full border border-[#5E6AD2]/40 bg-[#5E6AD2]/15 px-3 py-1 text-[11px] uppercase tracking-[0.14em] text-[#c8ceff]">
             Pharmacopeia Workflow
           </span>
@@ -299,11 +394,11 @@ export default function App() {
           <p className="mt-3 max-w-3xl text-base leading-relaxed text-fgMuted">
             Rebuilt UI with a proper API architecture. Core extraction, translation, and DOCX logic remain unchanged.
           </p>
-        </header>
+        </SpotlightCard>
 
         <div className="mt-6 grid gap-6 lg:grid-cols-[320px_1fr]">
           <aside className="space-y-4 lg:sticky lg:top-4 lg:h-fit">
-            <section className="card p-4">
+            <SpotlightCard className="p-4" delay={80}>
               <h2 className="text-sm font-semibold uppercase tracking-[0.14em] text-fgMuted">Settings</h2>
               <div className="mt-3 space-y-3">
                 <div>
@@ -343,9 +438,9 @@ export default function App() {
                   </div>
                 ) : null}
               </div>
-            </section>
+            </SpotlightCard>
 
-            <section className="card p-4">
+            <SpotlightCard className="p-4" delay={120}>
               <h3 className="text-sm font-semibold uppercase tracking-[0.14em] text-fgMuted">Runtime</h3>
               <div className="mt-3 space-y-2 text-sm text-fgMuted">
                 <p>
@@ -360,51 +455,53 @@ export default function App() {
                   Tables: <span className="text-fg">{capabilities?.has_camelot || capabilities?.has_tabula ? "advanced extractors ready" : "baseline only"}</span>
                 </p>
               </div>
-            </section>
+            </SpotlightCard>
           </aside>
 
           <section className="space-y-4">
-            <form className="card p-5 md:p-6" onSubmit={onExtract}>
-              <StepHeader
-                step="Step 1"
-                title="Upload COA + Optional Template"
-                subtitle="Supports PDF and image files. Template stays optional and is applied at DOCX generation."
-              />
+            <SpotlightCard className="p-5 md:p-6" delay={160}>
+              <form onSubmit={onExtract}>
+                <StepHeader
+                  step="Step 1"
+                  title="Upload COA + Optional Template"
+                  subtitle="Supports PDF and image files. Template stays optional and is applied at DOCX generation."
+                />
 
-              <div className="grid gap-4 md:grid-cols-2">
-                <div>
-                  <label className="mb-1 block text-xs text-fgMuted">COA file</label>
-                  <input
-                    className="file"
-                    type="file"
-                    accept=".pdf,.png,.jpg,.jpeg,.tif,.tiff,.bmp,.webp"
-                    onChange={(e) => setCoaFile(e.target.files?.[0] ?? null)}
-                  />
+                <div className="grid gap-4 md:grid-cols-2">
+                  <div>
+                    <label className="mb-1 block text-xs text-fgMuted">COA file</label>
+                    <input
+                      className="file"
+                      type="file"
+                      accept=".pdf,.png,.jpg,.jpeg,.tif,.tiff,.bmp,.webp"
+                      onChange={(e) => setCoaFile(e.target.files?.[0] ?? null)}
+                    />
+                  </div>
+
+                  <div>
+                    <label className="mb-1 block text-xs text-fgMuted">Word structure template (.docx, optional)</label>
+                    <input
+                      className="file"
+                      type="file"
+                      accept=".docx"
+                      onChange={(e) => setTemplateFile(e.target.files?.[0] ?? null)}
+                    />
+                  </div>
                 </div>
 
-                <div>
-                  <label className="mb-1 block text-xs text-fgMuted">Word structure template (.docx, optional)</label>
-                  <input
-                    className="file"
-                    type="file"
-                    accept=".docx"
-                    onChange={(e) => setTemplateFile(e.target.files?.[0] ?? null)}
-                  />
+                <div className="mt-4 flex flex-wrap items-center gap-3">
+                  <button className="btn-primary min-w-[180px]" disabled={extracting} type="submit">
+                    {extracting ? "Extracting..." : "Extract Text"}
+                  </button>
+                  <span className="text-sm text-fgMuted">
+                    {coaFile ? `${coaFile.name} (${(coaFile.size / (1024 * 1024)).toFixed(2)} MB)` : "No file selected"}
+                  </span>
                 </div>
-              </div>
-
-              <div className="mt-4 flex flex-wrap items-center gap-3">
-                <button className="btn-primary min-w-[180px]" disabled={extracting || !coaFile} type="submit">
-                  {extracting ? "Extracting..." : "Extract Text"}
-                </button>
-                <span className="text-sm text-fgMuted">
-                  {coaFile ? `${coaFile.name} (${(coaFile.size / (1024 * 1024)).toFixed(2)} MB)` : "No file selected"}
-                </span>
-              </div>
-            </form>
+              </form>
+            </SpotlightCard>
 
             {extraction ? (
-              <section className="card p-5 md:p-6">
+              <SpotlightCard className="p-5 md:p-6" delay={220}>
                 <StepHeader
                   step="Step 2"
                   title="Extraction Preview"
@@ -429,11 +526,11 @@ export default function App() {
                     {extraction.error ?? "Failed to extract text."}
                   </p>
                 )}
-              </section>
+              </SpotlightCard>
             ) : null}
 
             {extraction?.success ? (
-              <section className="card p-5 md:p-6">
+              <SpotlightCard className="p-5 md:p-6" delay={280}>
                 <StepHeader
                   step="Step 3"
                   title="Translate to Russian"
@@ -445,17 +542,17 @@ export default function App() {
                     className="btn-primary min-w-[210px]"
                     type="button"
                     onClick={onTranslate}
-                    disabled={translating || !apiKey || !selectedModel}
+                    disabled={translating}
                   >
                     {translating ? "Translating..." : "Translate to Russian"}
                   </button>
                   <span className="text-sm text-fgMuted">Model: {selectedModel || "set custom model"}</span>
                 </div>
-              </section>
+              </SpotlightCard>
             ) : null}
 
             {translation ? (
-              <section className="card p-5 md:p-6">
+              <SpotlightCard className="p-5 md:p-6" delay={340}>
                 <StepHeader
                   step="Step 3.5"
                   title="Bilingual Review"
@@ -522,11 +619,11 @@ export default function App() {
                     {translation.error ?? "Translation failed."}
                   </p>
                 )}
-              </section>
+              </SpotlightCard>
             ) : null}
 
             {translation?.success ? (
-              <section className="card p-5 md:p-6">
+              <SpotlightCard className="p-5 md:p-6" delay={400}>
                 <StepHeader
                   step="Step 4"
                   title="Export Clean DOCX"
@@ -535,12 +632,13 @@ export default function App() {
                 <button className="btn-primary min-w-[220px]" type="button" onClick={onGenerateDoc} disabled={generating}>
                   {generating ? "Generating DOCX..." : "Download Translated COA (.docx)"}
                 </button>
-              </section>
+              </SpotlightCard>
             ) : null}
 
             {errorMessage ? (
-              <section className="rounded-xl border border-rose-400/40 bg-rose-500/10 px-4 py-3 text-sm text-rose-200">
-                {errorMessage}
+              <section className="alert-error reveal px-4 py-3 text-sm text-rose-100" role="alert">
+                <p className="font-medium tracking-wide">Request Failed</p>
+                <p className="mt-1 text-rose-100/95">{errorMessage}</p>
               </section>
             ) : null}
           </section>

@@ -59,6 +59,41 @@ body {
   @apply rounded-2xl border border-white/[0.06] bg-gradient-to-b from-white/[0.08] to-white/[0.02] shadow-card;
 }
 
+.spotlight-card {
+  position: relative;
+  overflow: hidden;
+  isolation: isolate;
+  transform-style: preserve-3d;
+  transform: perspective(1200px) rotateX(var(--rx, 0deg)) rotateY(var(--ry, 0deg));
+  transition: transform 240ms cubic-bezier(0.16, 1, 0.3, 1), box-shadow 220ms ease;
+}
+
+.spotlight-card::before {
+  content: "";
+  position: absolute;
+  inset: -1px;
+  pointer-events: none;
+  z-index: 0;
+  opacity: var(--spot-opacity, 0);
+  background: radial-gradient(
+    360px circle at var(--mx, 50%) var(--my, 50%),
+    rgba(94, 106, 210, 0.27),
+    rgba(94, 106, 210, 0.11) 22%,
+    rgba(94, 106, 210, 0) 66%
+  );
+  transition: opacity 200ms ease;
+}
+
+.spotlight-card > * {
+  position: relative;
+  z-index: 1;
+}
+
+.spotlight-card:hover {
+  transform: perspective(1200px) rotateX(var(--rx, 0deg)) rotateY(var(--ry, 0deg))
+    translateY(-4px);
+}
+
 .card:hover {
   box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.1), 0 8px 40px rgba(0, 0, 0, 0.5),
     0 0 80px rgba(94, 106, 210, 0.1);
@@ -113,6 +148,17 @@ body {
   @apply inline-flex rounded-full border border-white/[0.08] bg-white/[0.03] px-3 py-1 text-[11px] tracking-[0.14em] text-white/70;
 }
 
+.alert-error {
+  border-radius: 14px;
+  border: 1px solid rgba(251, 113, 133, 0.45);
+  background: linear-gradient(
+    180deg,
+    rgba(244, 63, 94, 0.2),
+    rgba(225, 29, 72, 0.12)
+  );
+  box-shadow: 0 0 0 1px rgba(251, 113, 133, 0.28), 0 8px 28px rgba(136, 19, 55, 0.28);
+}
+
 .diff-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -139,10 +185,34 @@ body {
   @apply border-rose-400/40 bg-rose-500/10;
 }
 
+@keyframes fadeUp {
+  from {
+    opacity: 0;
+    transform: translateY(20px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.reveal {
+  opacity: 0;
+  animation: fadeUp 640ms cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  animation-delay: var(--reveal-delay, 0ms);
+}
+
 @media (prefers-reduced-motion: reduce) {
   .ambient-blob,
-  .btn-primary {
+  .btn-primary,
+  .spotlight-card,
+  .reveal {
     animation: none !important;
     transition: none !important;
+    transform: none !important;
+  }
+
+  .reveal {
+    opacity: 1 !important;
   }
 }
