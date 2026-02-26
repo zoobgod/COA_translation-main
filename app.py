@@ -77,8 +77,8 @@ def _run_generate_structured_doc(
 # ---------------------------------------------------------------------------
 st.set_page_config(
     page_title="COA Translator — EN → RU",
-    page_icon="💊",
-    layout="centered",
+    page_icon="🧪",
+    layout="wide",
 )
 
 # ---------------------------------------------------------------------------
@@ -87,13 +87,434 @@ st.set_page_config(
 st.markdown(
     """
     <style>
-    .main-header {
-        text-align: center;
-        padding: 1rem 0;
+    :root {
+        --bg-deep: #020203;
+        --bg-base: #050506;
+        --bg-elevated: #0a0a0c;
+        --surface: rgba(255, 255, 255, 0.05);
+        --surface-hover: rgba(255, 255, 255, 0.08);
+        --fg: #EDEDEF;
+        --fg-muted: #8A8F98;
+        --fg-subtle: rgba(255, 255, 255, 0.6);
+        --accent: #5E6AD2;
+        --accent-bright: #6872D9;
+        --accent-glow: rgba(94, 106, 210, 0.30);
+        --border-default: rgba(255, 255, 255, 0.06);
+        --border-hover: rgba(255, 255, 255, 0.10);
+        --border-accent: rgba(94, 106, 210, 0.30);
     }
-    .main-header h1 {
-        color: #1E88E5;
-        font-size: 2rem;
+
+    html, body, [class*="css"], [data-testid="stAppViewContainer"] {
+        font-family: "Inter", "Geist Sans", system-ui, sans-serif;
+    }
+
+    .stApp {
+        background:
+            radial-gradient(ellipse at top, #0a0a0f 0%, #050506 50%, #020203 100%);
+        color: var(--fg);
+        overflow-x: hidden;
+    }
+
+    .stApp::before {
+        content: "";
+        position: fixed;
+        inset: 0;
+        background-image:
+            radial-gradient(rgba(255, 255, 255, 0.02) 1px, transparent 1px);
+        background-size: 64px 64px;
+        opacity: 0.45;
+        pointer-events: none;
+        z-index: 0;
+    }
+
+    .stApp::after {
+        content: "";
+        position: fixed;
+        inset: 0;
+        background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140' viewBox='0 0 140 140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='1.2' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='140' height='140' filter='url(%23n)' opacity='1'/%3E%3C/svg%3E");
+        opacity: 0.015;
+        pointer-events: none;
+        mix-blend-mode: screen;
+        z-index: 0;
+    }
+
+    .linear-ambient {
+        position: fixed;
+        inset: 0;
+        pointer-events: none;
+        z-index: 0;
+    }
+
+    .linear-ambient .blob {
+        position: absolute;
+        border-radius: 999px;
+        filter: blur(120px);
+        animation: float 10s ease-in-out infinite;
+        opacity: 0.18;
+    }
+
+    .linear-ambient .blob-primary {
+        width: 900px;
+        height: 1400px;
+        top: -450px;
+        left: 50%;
+        transform: translateX(-50%);
+        background: radial-gradient(circle, rgba(94, 106, 210, 0.8) 0%, rgba(94, 106, 210, 0) 68%);
+    }
+
+    .linear-ambient .blob-left {
+        width: 650px;
+        height: 900px;
+        left: -260px;
+        top: 120px;
+        background: radial-gradient(circle, rgba(146, 99, 237, 0.55) 0%, rgba(146, 99, 237, 0) 70%);
+        animation-duration: 12s;
+    }
+
+    .linear-ambient .blob-right {
+        width: 560px;
+        height: 780px;
+        right: -180px;
+        top: 260px;
+        background: radial-gradient(circle, rgba(94, 106, 210, 0.60) 0%, rgba(94, 106, 210, 0) 72%);
+        animation-duration: 11s;
+    }
+
+    .linear-ambient .blob-bottom {
+        width: 720px;
+        height: 420px;
+        left: 30%;
+        bottom: -160px;
+        background: radial-gradient(circle, rgba(94, 106, 210, 0.38) 0%, rgba(94, 106, 210, 0) 74%);
+        animation: pulseGlow 8s ease-in-out infinite;
+    }
+
+    @keyframes float {
+        0%, 100% { transform: translateY(0px); }
+        50% { transform: translateY(-20px); }
+    }
+
+    @keyframes pulseGlow {
+        0%, 100% { opacity: 0.12; transform: translateY(0px); }
+        50% { opacity: 0.2; transform: translateY(-14px); }
+    }
+
+    [data-testid="stAppViewContainer"] > .main,
+    [data-testid="stSidebar"] {
+        position: relative;
+        z-index: 1;
+    }
+
+    .block-container {
+        max-width: 1160px;
+        padding-top: 2rem;
+        padding-bottom: 3rem;
+    }
+
+    .hero-shell {
+        border: 1px solid var(--border-default);
+        border-radius: 16px;
+        background: linear-gradient(180deg, rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0.02));
+        box-shadow:
+            0 0 0 1px rgba(255, 255, 255, 0.05),
+            0 20px 60px rgba(0, 0, 0, 0.45),
+            0 0 90px rgba(94, 106, 210, 0.10);
+        padding: 1.5rem;
+        margin-bottom: 1.5rem;
+        backdrop-filter: blur(8px);
+    }
+
+    .hero-kicker {
+        display: inline-flex;
+        align-items: center;
+        gap: 0.4rem;
+        border-radius: 999px;
+        border: 1px solid var(--border-accent);
+        padding: 0.2rem 0.65rem;
+        font-size: 0.72rem;
+        letter-spacing: 0.09em;
+        text-transform: uppercase;
+        color: #c9d0ff;
+        background: rgba(94, 106, 210, 0.12);
+        margin-bottom: 0.8rem;
+    }
+
+    .hero-title {
+        margin: 0;
+        font-size: clamp(2rem, 3vw, 3.4rem);
+        line-height: 1.05;
+        letter-spacing: -0.03em;
+        font-weight: 650;
+        background: linear-gradient(to bottom, #ffffff, rgba(255, 255, 255, 0.72));
+        -webkit-background-clip: text;
+        background-clip: text;
+        color: transparent;
+    }
+
+    .hero-title .accent {
+        background: linear-gradient(90deg, #5E6AD2 0%, #8C96EC 45%, #5E6AD2 100%);
+        background-size: 200% auto;
+        animation: shimmer 5s linear infinite;
+        -webkit-background-clip: text;
+        background-clip: text;
+        color: transparent;
+    }
+
+    @keyframes shimmer {
+        0% { background-position: 0% center; }
+        100% { background-position: 200% center; }
+    }
+
+    .hero-subtitle {
+        margin-top: 0.55rem;
+        margin-bottom: 0;
+        color: var(--fg-muted);
+        font-size: 1rem;
+        line-height: 1.6;
+        max-width: 74ch;
+    }
+
+    .step-head {
+        margin-top: 1.1rem;
+        margin-bottom: 0.55rem;
+    }
+
+    .step-pill {
+        display: inline-flex;
+        padding: 0.2rem 0.65rem;
+        border-radius: 999px;
+        border: 1px solid var(--border-default);
+        background: rgba(255, 255, 255, 0.03);
+        color: var(--fg-subtle);
+        font-size: 0.74rem;
+        letter-spacing: 0.07em;
+        text-transform: uppercase;
+    }
+
+    .step-title {
+        margin-top: 0.55rem;
+        margin-bottom: 0;
+        color: var(--fg);
+        font-size: clamp(1.18rem, 2vw, 1.7rem);
+        line-height: 1.24;
+        letter-spacing: -0.02em;
+    }
+
+    .step-subtitle {
+        margin-top: 0.25rem;
+        margin-bottom: 0;
+        color: var(--fg-muted);
+        font-size: 0.94rem;
+    }
+
+    [data-testid="stSidebar"] {
+        background: linear-gradient(180deg, rgba(10, 10, 12, 0.96), rgba(5, 5, 6, 0.95));
+        border-right: 1px solid var(--border-default);
+    }
+
+    [data-testid="stSidebar"] [data-testid="stMarkdownContainer"],
+    [data-testid="stSidebar"] label,
+    [data-testid="stSidebar"] p,
+    [data-testid="stSidebar"] span,
+    [data-testid="stSidebar"] h1,
+    [data-testid="stSidebar"] h2,
+    [data-testid="stSidebar"] h3,
+    [data-testid="stSidebar"] h4 {
+        color: var(--fg);
+    }
+
+    [data-testid="stFileUploaderDropzone"] {
+        border: 1px dashed var(--border-accent);
+        border-radius: 16px;
+        background: linear-gradient(180deg, rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0.02));
+        transition: border-color 220ms ease, background 220ms ease, box-shadow 220ms ease;
+    }
+
+    [data-testid="stFileUploaderDropzone"]:hover {
+        border-color: rgba(94, 106, 210, 0.55);
+        background: linear-gradient(180deg, rgba(255, 255, 255, 0.09), rgba(255, 255, 255, 0.03));
+        box-shadow:
+            0 0 0 1px rgba(255, 255, 255, 0.06),
+            0 8px 40px rgba(0, 0, 0, 0.45),
+            0 0 60px rgba(94, 106, 210, 0.16);
+    }
+
+    [data-testid="stTextInput"] input,
+    [data-testid="stTextArea"] textarea,
+    [data-baseweb="select"] > div,
+    [data-testid="stNumberInput"] input {
+        background: rgba(15, 15, 18, 0.96) !important;
+        border: 1px solid rgba(255, 255, 255, 0.10) !important;
+        color: var(--fg) !important;
+        border-radius: 10px !important;
+        transition: border-color 220ms ease, box-shadow 220ms ease, transform 220ms ease;
+    }
+
+    [data-testid="stTextInput"] input:focus,
+    [data-testid="stTextArea"] textarea:focus,
+    [data-baseweb="select"] > div:focus-within {
+        border-color: var(--accent) !important;
+        box-shadow: 0 0 0 2px rgba(94, 106, 210, 0.28) !important;
+    }
+
+    [data-testid="stTextInput"] input::placeholder,
+    [data-testid="stTextArea"] textarea::placeholder {
+        color: rgba(255, 255, 255, 0.46) !important;
+    }
+
+    [data-testid="stMetric"] {
+        border-radius: 16px;
+        border: 1px solid var(--border-default);
+        background: linear-gradient(180deg, rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0.03));
+        padding: 0.9rem 1rem;
+        box-shadow:
+            0 0 0 1px rgba(255, 255, 255, 0.05),
+            0 10px 30px rgba(0, 0, 0, 0.35);
+    }
+
+    [data-testid="stMetric"] label p,
+    [data-testid="stMetric"] [data-testid="stMetricLabel"] p {
+        color: var(--fg-muted);
+        letter-spacing: 0.03em;
+    }
+
+    [data-testid="stMetric"] [data-testid="stMetricValue"] {
+        color: var(--fg);
+        font-weight: 560;
+    }
+
+    .stButton > button,
+    .stDownloadButton > button {
+        border: 1px solid rgba(94, 106, 210, 0.45) !important;
+        border-radius: 10px !important;
+        background: linear-gradient(180deg, #6872D9, #5E6AD2) !important;
+        color: #ffffff !important;
+        font-weight: 600 !important;
+        letter-spacing: 0.01em;
+        box-shadow:
+            0 0 0 1px rgba(94, 106, 210, 0.50),
+            0 8px 24px rgba(94, 106, 210, 0.33),
+            inset 0 1px 0 0 rgba(255, 255, 255, 0.28);
+        transition: transform 220ms cubic-bezier(0.16, 1, 0.3, 1), box-shadow 220ms ease, filter 220ms ease;
+    }
+
+    .stButton > button:hover,
+    .stDownloadButton > button:hover {
+        transform: translateY(-3px);
+        filter: brightness(1.03);
+        box-shadow:
+            0 0 0 1px rgba(104, 114, 217, 0.58),
+            0 14px 42px rgba(94, 106, 210, 0.38),
+            0 0 80px rgba(94, 106, 210, 0.16),
+            inset 0 1px 0 0 rgba(255, 255, 255, 0.34);
+    }
+
+    .stButton > button:active,
+    .stDownloadButton > button:active {
+        transform: scale(0.98);
+        box-shadow:
+            0 0 0 1px rgba(94, 106, 210, 0.35),
+            0 4px 14px rgba(94, 106, 210, 0.24),
+            inset 0 1px 0 0 rgba(255, 255, 255, 0.20);
+    }
+
+    .stButton > button:focus,
+    .stDownloadButton > button:focus {
+        outline: none !important;
+        box-shadow:
+            0 0 0 2px rgba(94, 106, 210, 0.36),
+            0 0 0 6px rgba(5, 5, 6, 0.92),
+            0 8px 24px rgba(94, 106, 210, 0.25) !important;
+    }
+
+    .stExpander,
+    [data-testid="stExpander"] {
+        border-radius: 14px !important;
+        border: 1px solid var(--border-default) !important;
+        background: linear-gradient(180deg, rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0.02)) !important;
+        overflow: hidden;
+        box-shadow: 0 10px 24px rgba(0, 0, 0, 0.30);
+    }
+
+    [data-testid="stAlert"] {
+        border-radius: 12px;
+        border: 1px solid var(--border-default);
+        background: rgba(255, 255, 255, 0.04);
+        color: var(--fg);
+    }
+
+    [data-testid="stProgressBar"] > div > div > div > div {
+        background: linear-gradient(90deg, #5E6AD2, #8C96EC) !important;
+    }
+
+    div[data-testid="stHorizontalBlock"] > div {
+        gap: 1rem !important;
+    }
+
+    .block-divider {
+        margin: 1.5rem 0;
+        height: 1px;
+        background: linear-gradient(90deg, rgba(255, 255, 255, 0.0), rgba(255, 255, 255, 0.10), rgba(255, 255, 255, 0.0));
+    }
+
+    .diff {
+        font-size: 12px;
+        width: 100%;
+        border-collapse: collapse;
+        background: rgba(10, 10, 12, 0.88);
+        color: #d9dce4;
+    }
+
+    .diff_header {
+        background: rgba(94, 106, 210, 0.26);
+        color: #eef1ff;
+    }
+
+    .diff_next {
+        background: rgba(255, 255, 255, 0.06);
+    }
+
+    .diff_add {
+        background: rgba(73, 187, 133, 0.18);
+    }
+
+    .diff_chg {
+        background: rgba(245, 171, 70, 0.20);
+    }
+
+    .diff_sub {
+        background: rgba(227, 95, 111, 0.22);
+    }
+
+    .footer-note {
+        text-align: center;
+        color: var(--fg-muted);
+        font-size: 0.84rem;
+        padding-top: 0.4rem;
+    }
+
+    @media (max-width: 900px) {
+        .block-container {
+            padding-top: 1.1rem;
+        }
+
+        .hero-shell {
+            padding: 1.1rem;
+        }
+
+        .hero-title {
+            font-size: clamp(1.65rem, 9vw, 2.5rem);
+        }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+        .linear-ambient .blob,
+        .hero-title .accent,
+        .stButton > button,
+        .stDownloadButton > button {
+            animation: none !important;
+            transition: none !important;
+        }
     }
     </style>
     """,
@@ -104,18 +525,56 @@ st.markdown(
 # Header
 # ---------------------------------------------------------------------------
 st.markdown(
-    '<div class="main-header">'
-    "<h1>Pharmaceutical COA Translator</h1>"
-    "<p>English → Russian | Certificate of Analysis</p>"
-    "</div>",
+    """
+    <div class="linear-ambient" aria-hidden="true">
+        <div class="blob blob-primary"></div>
+        <div class="blob blob-left"></div>
+        <div class="blob blob-right"></div>
+        <div class="blob blob-bottom"></div>
+    </div>
+    <section class="hero-shell">
+        <div class="hero-kicker">Pharmacopeia Workflow</div>
+        <h1 class="hero-title">
+            Pharmaceutical <span class="accent">COA Translator</span>
+        </h1>
+        <p class="hero-subtitle">
+            Extract, review, and convert English Certificates of Analysis to
+            polished Russian output while preserving technical structure.
+        </p>
+    </section>
+    """,
     unsafe_allow_html=True,
 )
+
+
+def render_step_header(step: str, title: str, subtitle: str) -> None:
+    st.markdown(
+        f"""
+        <div class="step-head">
+            <span class="step-pill">{step}</span>
+            <h2 class="step-title">{title}</h2>
+            <p class="step-subtitle">{subtitle}</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+st.markdown('<div class="block-divider"></div>', unsafe_allow_html=True)
 
 # ---------------------------------------------------------------------------
 # Sidebar — Settings
 # ---------------------------------------------------------------------------
 with st.sidebar:
-    st.header("Settings")
+    st.markdown(
+        """
+        <div class="hero-kicker">Workspace Settings</div>
+        <p class="step-subtitle" style="margin-bottom: 0.8rem;">
+            Configure model access and optional output template behavior.
+        </p>
+        """,
+        unsafe_allow_html=True,
+    )
 
     api_key = st.text_input(
         "OpenAI API Key",
@@ -151,7 +610,7 @@ with st.sidebar:
 
     st.divider()
 
-    st.subheader("Word Template (optional)")
+    st.markdown("**Word Template (optional)**")
     user_template = st.file_uploader(
         "Upload a .docx structure template",
         type=["docx"],
@@ -185,7 +644,11 @@ with st.sidebar:
 # ---------------------------------------------------------------------------
 # Main content
 # ---------------------------------------------------------------------------
-st.subheader("1. Upload COA File")
+render_step_header(
+    "Step 1",
+    "Upload COA File",
+    "Import a certificate in PDF or image format for extraction.",
+)
 
 caps = get_extraction_capabilities()
 if not caps["has_ocr"]:
@@ -240,7 +703,12 @@ if uploaded_file is not None:
     # ------------------------------------------------------------------
     # Step 2: Extract text
     # ------------------------------------------------------------------
-    st.subheader("2. Extract Text")
+    st.markdown('<div class="block-divider"></div>', unsafe_allow_html=True)
+    render_step_header(
+        "Step 2",
+        "Extract Full Source Text",
+        "Run multi-method extraction and OCR to recover complete COA content.",
+    )
 
     if (
         "extraction_result" not in st.session_state
@@ -286,7 +754,12 @@ if uploaded_file is not None:
         # ------------------------------------------------------------------
         # Step 3: Translate
         # ------------------------------------------------------------------
-        st.subheader("3. Translate to Russian")
+        st.markdown('<div class="block-divider"></div>', unsafe_allow_html=True)
+        render_step_header(
+            "Step 3",
+            "Translate to Russian",
+            "Generate a high-fidelity technical translation for professional review.",
+        )
 
         if not api_key:
             st.warning(
@@ -350,7 +823,15 @@ if uploaded_file is not None:
                             disabled=True,
                         )
 
-                    st.subheader("3.5 Bilingual Review")
+                    st.markdown(
+                        '<div class="block-divider"></div>',
+                        unsafe_allow_html=True,
+                    )
+                    render_step_header(
+                        "Step 3.5",
+                        "Bilingual Review",
+                        "Compare English extraction and Russian translation before export.",
+                    )
                     left_col, right_col = st.columns(2)
                     with left_col:
                         st.text_area(
@@ -385,20 +866,22 @@ if uploaded_file is not None:
                             "Showing first 250 lines for performance."
                         )
                         st.markdown(
-                            "<style>"
-                            ".diff {font-size: 12px; width: 100%;}"
-                            ".diff_header {background: #f1f5f9;}"
-                            ".diff_add {background: #e8f5e9;}"
-                            ".diff_sub {background: #ffebee;}"
-                            "</style>"
-                            + diff_html,
+                            diff_html,
                             unsafe_allow_html=True,
                         )
 
                     # ------------------------------------------------------
                     # Step 4: Generate & Download Word doc
                     # ------------------------------------------------------
-                    st.subheader("4. Download Word Document")
+                    st.markdown(
+                        '<div class="block-divider"></div>',
+                        unsafe_allow_html=True,
+                    )
+                    render_step_header(
+                        "Step 4",
+                        "Download Word Document",
+                        "Export clean translated COA content in .docx format.",
+                    )
 
                     if "doc_bytes" not in st.session_state or translate_btn:
                         with st.spinner("Generating Word document..."):
@@ -467,12 +950,10 @@ if uploaded_file is not None:
 # ---------------------------------------------------------------------------
 # Footer
 # ---------------------------------------------------------------------------
-st.divider()
+st.markdown('<div class="block-divider"></div>', unsafe_allow_html=True)
 st.markdown(
-    "<div style='text-align: center; color: #888; font-size: 0.8rem;'>"
-    "COA Translator v2.0 | Fixed-structure output | "
-    "Pharmaceutical glossary with 200+ terms | "
-    "Powered by OpenAI"
+    "<div class='footer-note'>"
+    "COA Translator | EN → RU workflow with OCR, table support, and structured DOCX export"
     "</div>",
     unsafe_allow_html=True,
 )
