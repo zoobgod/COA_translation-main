@@ -23,6 +23,47 @@ body {
   background: radial-gradient(ellipse at top, #0a0a0f 0%, #050506 50%, #020203 100%);
 }
 
+.top-progress-shell {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 120;
+  padding: 0.5rem 0.75rem 0;
+  pointer-events: none;
+}
+
+.top-progress-track {
+  width: 100%;
+  height: 8px;
+  border-radius: 999px;
+  background: rgba(6, 20, 8, 0.9);
+  border: 1px solid rgba(84, 255, 140, 0.2);
+  box-shadow: 0 0 0 1px rgba(16, 120, 56, 0.28), inset 0 1px 0 rgba(255, 255, 255, 0.08);
+  overflow: hidden;
+}
+
+.top-progress-fill {
+  height: 100%;
+  width: 0;
+  border-radius: inherit;
+  transition: width 220ms cubic-bezier(0.16, 1, 0.3, 1);
+  background: linear-gradient(90deg, #39f98b 0%, #68ffc6 46%, #14ff8e 100%);
+  box-shadow:
+    0 0 16px rgba(67, 255, 153, 0.6),
+    0 0 34px rgba(67, 255, 153, 0.35),
+    inset 0 0 6px rgba(255, 255, 255, 0.4);
+}
+
+.top-progress-label {
+  margin-top: 0.28rem;
+  text-align: right;
+  font-size: 0.72rem;
+  color: rgba(173, 255, 211, 0.95);
+  letter-spacing: 0.03em;
+  text-shadow: 0 0 10px rgba(72, 255, 169, 0.52);
+}
+
 .ambient-layer {
   position: fixed;
   inset: 0;
@@ -148,6 +189,18 @@ body {
   @apply inline-flex rounded-full border border-white/[0.08] bg-white/[0.03] px-3 py-1 text-[11px] tracking-[0.14em] text-white/70;
 }
 
+.link-subtle {
+  display: block;
+  color: #a8b0ff;
+  text-decoration: none;
+  transition: color 180ms ease, text-shadow 180ms ease;
+}
+
+.link-subtle:hover {
+  color: #c4cbff;
+  text-shadow: 0 0 12px rgba(120, 137, 255, 0.45);
+}
+
 .alert-error {
   border-radius: 14px;
   border: 1px solid rgba(251, 113, 133, 0.45);
@@ -206,7 +259,8 @@ body {
   .ambient-blob,
   .btn-primary,
   .spotlight-card,
-  .reveal {
+  .reveal,
+  .top-progress-fill {
     animation: none !important;
     transition: none !important;
     transform: none !important;

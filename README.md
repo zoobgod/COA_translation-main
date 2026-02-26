@@ -10,6 +10,7 @@ Core logic remains unchanged and still uses:
 
 - Multi-method PDF/image extraction with OCR and optional Camelot/Tabula table recovery
 - OpenAI structured pharmaceutical translation with glossary enforcement
+- Optional user glossary upload merged into translation prompts
 - Template-aware `.docx` output generation
 
 ## Architecture

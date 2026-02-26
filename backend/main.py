@@ -32,6 +32,7 @@ class TranslateRequest(BaseModel):
     model: str = "gpt-4.1"
     template_hints: dict[str, Any] | None = None
     table_supplement: str = ""
+    custom_glossary: str = ""
 
 
 class GenerateDocRequest(BaseModel):
@@ -57,6 +58,7 @@ def _run_translation_structured(
     model: str,
     template_hints: dict[str, Any] | None,
     table_supplement: str,
+    custom_glossary: str = "",
 ) -> dict[str, Any]:
     params = inspect.signature(translate_text_structured).parameters
     kwargs: dict[str, Any] = {
@@ -69,6 +71,8 @@ def _run_translation_structured(
         kwargs["template_hints"] = template_hints
     if "table_supplement" in params:
         kwargs["table_supplement"] = table_supplement
+    if "custom_glossary" in params:
+        kwargs["custom_glossary"] = custom_glossary
     return translate_text_structured(**kwargs)
 
 
@@ -274,6 +278,7 @@ def translate(req: TranslateRequest) -> JSONResponse:
         model=req.model,
         template_hints=req.template_hints,
         table_supplement=req.table_supplement,
+        custom_glossary=req.custom_glossary,
     )
     status_code = 200 if result.get("success") else 422
     return JSONResponse(content=result, status_code=status_code)
@@ -314,6 +319,7 @@ async def process(
     api_key: str = Form(...),
     model: str = Form("gpt-4.1"),
     template: UploadFile | None = File(None),
+    custom_glossary: str = Form(""),
 ) -> ProcessPipelineResponse:
     try:
         file_bytes = await file.read()
@@ -337,6 +343,7 @@ async def process(
             model=model,
             template_hints=template_hints,
             table_supplement=extraction.get("table_supplement", ""),
+            custom_glossary=custom_glossary,
         )
         if not translation.get("success"):
             return ProcessPipelineResponse(

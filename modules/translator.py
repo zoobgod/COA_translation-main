@@ -29,6 +29,7 @@ logger = logging.getLogger(__name__)
 MAX_CHUNK_SIZE = 6000
 STRUCTURED_MAX_TOKENS = 12000
 STRUCTURED_MIN_ALNUM_RATIO = 0.45
+CUSTOM_GLOSSARY_MAX_CHARS = 24000
 
 # ---------------------------------------------------------------------------
 # System prompts
@@ -38,6 +39,11 @@ _GLOSSARY_RULES = """\
 MANDATORY PHARMACEUTICAL GLOSSARY (English → Russian) — always prefer these \
 over any generic translation:
 {glossary}
+"""
+
+_USER_GLOSSARY_RULES = """\
+USER-PROVIDED GLOSSARY (highest priority; override defaults when conflicts exist):
+{user_glossary}
 """
 
 _COMMON_RULES = """\
@@ -100,8 +106,8 @@ Rules:
 """
 
 
-def _build_system_prompt(structured: bool) -> str:
-    glossary_text = get_glossary_prompt_section()
+def _build_system_prompt(structured: bool, custom_glossary: str = "") -> str:
+    glossary_text = _build_combined_glossary(custom_glossary)
     glossary_section = _GLOSSARY_RULES.format(glossary=glossary_text)
     common_rules = _COMMON_RULES
 
@@ -169,6 +175,7 @@ def translate_text(
     api_key: str,
     model: str = "gpt-4o",
     progress_callback: Optional[callable] = None,
+    custom_glossary: str = "",
 ) -> dict:
     """
     Translate pharmaceutical COA text from English to Russian using OpenAI.
@@ -176,7 +183,13 @@ def translate_text(
     Returns a **plain** translation (single text string) suitable for preview
     and for the legacy document-generation path.
     """
-    return _translate_plain(text, api_key, model, progress_callback)
+    return _translate_plain(
+        text,
+        api_key,
+        model,
+        progress_callback,
+        custom_glossary=custom_glossary,
+    )
 
 
 def translate_text_structured(
@@ -186,6 +199,7 @@ def translate_text_structured(
     progress_callback: Optional[callable] = None,
     template_hints: Optional[dict] = None,
     table_supplement: str = "",
+    custom_glossary: str = "",
 ) -> dict:
     """
     Translate pharmaceutical COA text and return **structured** output — a
@@ -204,6 +218,7 @@ def translate_text_structured(
         progress_callback,
         template_hints=template_hints,
         table_supplement=table_supplement,
+        custom_glossary=custom_glossary,
     )
 
 
@@ -216,13 +231,17 @@ def _translate_plain(
     api_key: str,
     model: str,
     progress_callback: Optional[callable],
+    custom_glossary: str = "",
 ) -> dict:
     if not text.strip():
         return _error_result("No text provided for translation", model)
 
     try:
         client = OpenAI(api_key=api_key)
-        system_prompt = _build_system_prompt(structured=False)
+        system_prompt = _build_system_prompt(
+            structured=False,
+            custom_glossary=custom_glossary,
+        )
         chunks = _chunk_text(text)
         translated_parts: list[str] = []
 
@@ -276,6 +295,7 @@ def _translate_structured(
     progress_callback: Optional[callable],
     template_hints: Optional[dict] = None,
     table_supplement: str = "",
+    custom_glossary: str = "",
 ) -> dict:
     if not text.strip():
         return _error_result("No text provided for translation", model)
@@ -285,7 +305,13 @@ def _translate_structured(
             progress_callback(1, 3)
 
         # Pass 1: high-fidelity full translation (quality-first).
-        plain_result = _translate_plain(text, api_key, model, None)
+        plain_result = _translate_plain(
+            text,
+            api_key,
+            model,
+            None,
+            custom_glossary=custom_glossary,
+        )
         if not plain_result["success"]:
             return plain_result
 
@@ -329,7 +355,13 @@ def _translate_structured(
         logger.error(f"Structured translation failed: {e}")
 
         # Final fallback: still provide clean full translation for end users.
-        plain_result = _translate_plain(text, api_key, model, None)
+        plain_result = _translate_plain(
+            text,
+            api_key,
+            model,
+            None,
+            custom_glossary=custom_glossary,
+        )
         if plain_result["success"]:
             sections = {k: "" for k in COA_FIELD_KEYS}
             sections["notes"] = plain_result["translated_text"]
@@ -346,6 +378,25 @@ def _translate_structured(
             return plain_result
 
         return _error_result(str(e), model)
+
+
+def _build_combined_glossary(custom_glossary: str = "") -> str:
+    """Merge built-in glossary with optional user-provided glossary."""
+    base = get_glossary_prompt_section().strip()
+    user = (custom_glossary or "").strip()
+    if not user:
+        return base
+
+    if len(user) > CUSTOM_GLOSSARY_MAX_CHARS:
+        logger.warning(
+            "Custom glossary too large (%s chars), truncating to %s chars",
+            len(user),
+            CUSTOM_GLOSSARY_MAX_CHARS,
+        )
+        user = user[:CUSTOM_GLOSSARY_MAX_CHARS]
+
+    user_section = _USER_GLOSSARY_RULES.format(user_glossary=user)
+    return f"{base}\n\n{user_section}"
 
 
 def _structure_translated_content(

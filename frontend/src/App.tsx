@@ -70,6 +70,57 @@ async function fileToBase64(file: File): Promise<string> {
   return btoa(binary);
 }
 
+function glossaryJsonToText(value: unknown): string {
+  if (Array.isArray(value)) {
+    const lines = value
+      .map((item) => {
+        if (typeof item === "string") {
+          return item.trim();
+        }
+        if (item && typeof item === "object") {
+          const entries = Object.entries(item as Record<string, unknown>);
+          if (entries.length >= 2) {
+            return `${String(entries[0][1] ?? "").trim()} => ${String(entries[1][1] ?? "").trim()}`;
+          }
+          if (entries.length === 1) {
+            const [k, v] = entries[0];
+            return `${k} => ${String(v ?? "").trim()}`;
+          }
+        }
+        return "";
+      })
+      .filter(Boolean);
+    return lines.join("\n");
+  }
+
+  if (value && typeof value === "object") {
+    const entries = Object.entries(value as Record<string, unknown>);
+    return entries.map(([k, v]) => `${k} => ${String(v ?? "").trim()}`).join("\n");
+  }
+
+  return "";
+}
+
+async function readGlossaryFile(file: File): Promise<string> {
+  const raw = (await file.text()).trim();
+  if (!raw) {
+    return "";
+  }
+
+  const lowerName = file.name.toLowerCase();
+  if (!lowerName.endsWith(".json")) {
+    return raw;
+  }
+
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    const normalized = glossaryJsonToText(parsed).trim();
+    return normalized || raw;
+  } catch {
+    return raw;
+  }
+}
+
 function buildDiffRows(source: string, translated: string, maxLines = 250): DiffRow[] {
   const src = source.split(/\r?\n/).slice(0, maxLines);
   const dst = translated.split(/\r?\n/).slice(0, maxLines);
@@ -184,6 +235,7 @@ export default function App() {
   const [apiKey, setApiKey] = useState("");
   const [modelChoice, setModelChoice] = useState("gpt-4.1");
   const [customModel, setCustomModel] = useState("");
+  const [glossaryFile, setGlossaryFile] = useState<File | null>(null);
 
   const [coaFile, setCoaFile] = useState<File | null>(null);
   const [templateFile, setTemplateFile] = useState<File | null>(null);
@@ -198,6 +250,8 @@ export default function App() {
   const [translation, setTranslation] = useState<TranslationResult | null>(null);
 
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [translateProgress, setTranslateProgress] = useState(0);
+  const [translateBarVisible, setTranslateBarVisible] = useState(false);
 
   const selectedModel = useMemo(() => {
     if (modelChoice === "custom") {
@@ -227,6 +281,34 @@ export default function App() {
 
     return () => controller.abort();
   }, []);
+
+  useEffect(() => {
+    if (!translating) {
+      return undefined;
+    }
+
+    setTranslateBarVisible(true);
+    setTranslateProgress(4);
+
+    const intervalId = window.setInterval(() => {
+      setTranslateProgress((current) => {
+        if (current >= 94) {
+          return current;
+        }
+        if (current < 35) {
+          return Math.min(94, current + 4.8);
+        }
+        if (current < 70) {
+          return Math.min(94, current + 2.4);
+        }
+        return Math.min(94, current + 1.0);
+      });
+    }, 180);
+
+    return () => {
+      window.clearInterval(intervalId);
+    };
+  }, [translating]);
 
   const onExtract = async (event: FormEvent) => {
     event.preventDefault();
@@ -288,6 +370,20 @@ export default function App() {
       return;
     }
 
+    let customGlossary = "";
+    if (glossaryFile) {
+      try {
+        customGlossary = await readGlossaryFile(glossaryFile);
+      } catch {
+        setErrorMessage("Could not read glossary file.");
+        return;
+      }
+      if (!customGlossary.trim()) {
+        setErrorMessage("Glossary file appears empty.");
+        return;
+      }
+    }
+
     setTranslating(true);
 
     try {
@@ -302,6 +398,7 @@ export default function App() {
           model: selectedModel,
           template_hints: extraction.template_hints ?? null,
           table_supplement: extraction.table_supplement ?? "",
+          custom_glossary: customGlossary,
         }),
       });
 
@@ -318,6 +415,11 @@ export default function App() {
       setErrorMessage(err instanceof Error ? err.message : "Translation request failed.");
     } finally {
       setTranslating(false);
+      setTranslateProgress(100);
+      window.setTimeout(() => {
+        setTranslateBarVisible(false);
+        setTranslateProgress(0);
+      }, 680);
     }
   };
 
@@ -377,6 +479,18 @@ export default function App() {
 
   return (
     <>
+      {translateBarVisible ? (
+        <div className="top-progress-shell" aria-live="polite">
+          <div className="top-progress-track">
+            <div
+              className="top-progress-fill"
+              style={{ width: `${translateProgress}%` }}
+            />
+          </div>
+          <div className="top-progress-label">Translating… {Math.round(translateProgress)}%</div>
+        </div>
+      ) : null}
+
       <div className="ambient-layer">
         <div className="ambient-blob left-[-260px] top-[120px] h-[800px] w-[620px] animate-float bg-[radial-gradient(circle,rgba(142,95,239,0.42)_0%,rgba(142,95,239,0)_70%)]" />
         <div className="ambient-blob right-[-160px] top-[180px] h-[760px] w-[560px] animate-float bg-[radial-gradient(circle,rgba(94,106,210,0.55)_0%,rgba(94,106,210,0)_72%)] [animation-duration:12s]" />
@@ -437,6 +551,36 @@ export default function App() {
                     />
                   </div>
                 ) : null}
+
+                <div>
+                  <label className="mb-1 block text-xs text-fgMuted">Custom glossary (optional)</label>
+                  <input
+                    className="file"
+                    type="file"
+                    accept=".txt,.csv,.tsv,.json,.md"
+                    onChange={(e) => setGlossaryFile(e.target.files?.[0] ?? null)}
+                  />
+                  <p className="mt-1 text-xs text-fgMuted">
+                    Format examples: English =&gt; Russian, CSV two columns, or JSON map.
+                  </p>
+                  {glossaryFile ? (
+                    <p className="mt-1 text-xs text-emerald-300">
+                      Loaded: {glossaryFile.name}
+                    </p>
+                  ) : null}
+                  <div className="mt-2 space-y-1 text-xs text-fgMuted">
+                    <p>Suggested sources:</p>
+                    <a className="link-subtle" href="https://www.who.int/teams/health-product-policy-and-standards/inn" target="_blank" rel="noreferrer">
+                      WHO INN Programme
+                    </a>
+                    <a className="link-subtle" href="https://www.usp.org/" target="_blank" rel="noreferrer">
+                      USP
+                    </a>
+                    <a className="link-subtle" href="https://www.edqm.eu/en/european-pharmacopoeia" target="_blank" rel="noreferrer">
+                      European Pharmacopoeia (EDQM)
+                    </a>
+                  </div>
+                </div>
               </div>
             </SpotlightCard>
 
