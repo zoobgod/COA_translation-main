@@ -4,3 +4,6 @@ __pycache__/
 *.pyo
 .env
 .python-version
+frontend/node_modules/
+frontend/dist/
+frontend/*.tsbuildinfo

@@ -1,153 +1,113 @@
-# COA Translation — Pharmaceutical Certificate of Analysis Translator
+# COA Translation Platform (Python API + TypeScript UI)
 
-Streamlit application that translates pharmaceutical Certificate of Analysis (COA) documents from English to Russian using OpenAI, with a specialized pharmaceutical and medicinal glossary.
+This project now runs as a modern web app stack:
 
-## Features
+- `backend/` FastAPI API (Python) reusing existing extraction/translation/doc generation logic
+- `frontend/` React + TypeScript + Tailwind UI (Linear-style dark interface)
+- `api/index.py` Vercel Python entrypoint
 
-- **PDF + Image Upload** — Upload COA documents as PDF or image files (`.png`, `.jpg`, `.tiff`, etc.)
-- **Multi-method text extraction** — Uses pdfplumber (primary), PyMuPDF/pdfium (fallback renderers), OCR via pytesseract, plus optional Camelot/Tabula table extraction for COA result tables
-- **Optimized OCR pipeline** — Image preprocessing (grayscale, autocontrast, sharpening, binarization) with tuned Tesseract settings (PSM 6 for structured documents) and pdfplumber-based rendering fallback when PyMuPDF is unavailable
-- **AI Translation with pharma glossary** — Translates via OpenAI models with a 200+ term pharmaceutical glossary enforcing standard Russian pharmaceutical terminology
-- **Structured JSON translation** — OpenAI outputs a structured JSON response mapping content to predefined COA sections, ensuring consistent document layout
-- **Fixed-structure Word output** — Every output document follows the same 10-section predefined structure regardless of the original PDF layout
-- **Custom template support** — Optionally upload your own `.docx` template with Jinja2 placeholders for custom formatting
-- **Template-aware translation pass** — If a template is uploaded, placeholder/heading hints are included in the same translation request to improve template population
-- **Bilingual review view** — Side-by-side English extracted text and Russian translation with line-by-line preview diff before download
-- **Clean professional output** — Generated files omit AI/model/extraction disclaimers to keep final COA documents clean
-- **Download** — One-click download of the translated document
+Core logic remains unchanged and still uses:
 
-## Setup
+- Multi-method PDF/image extraction with OCR and optional Camelot/Tabula table recovery
+- OpenAI structured pharmaceutical translation with glossary enforcement
+- Template-aware `.docx` output generation
 
-### Prerequisites
+## Architecture
 
-- Python 3.10+
-- OpenAI API key
-- (Optional) Tesseract OCR installed on the system for scanned PDF support
+```text
+frontend (React + TS + Tailwind)
+  -> /api/extract
+  -> /api/translate
+  -> /api/generate-doc
+backend (FastAPI)
+  -> modules/pdf_extractor.py
+  -> modules/translator.py
+  -> modules/doc_generator.py
+```
 
-### Installation
+## API Endpoints
+
+- `GET /api/health`
+- `GET /api/capabilities`
+- `POST /api/extract` (multipart: `file`, optional `template`)
+- `POST /api/translate` (JSON)
+- `POST /api/generate-doc` (JSON, streams `.docx`)
+- `POST /api/process` (single-call pipeline, multipart)
+
+## Local Development
+
+### 1) Python backend
 
 ```bash
+python -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
+python backend/run.py
 ```
 
-For OCR support (scanned PDFs), install Tesseract:
+Backend runs on `http://localhost:8000`.
+
+### 2) Frontend
 
 ```bash
-# Ubuntu/Debian
-sudo apt-get install tesseract-ocr
-
-# macOS
-brew install tesseract
+cd frontend
+npm install
+npm run dev
 ```
 
-### Streamlit Community Cloud deployment
+Frontend runs on `http://localhost:5173` and proxies `/api/*` to `localhost:8000`.
 
-This repo includes `packages.txt` for apt-level dependencies used by OCR:
+## Deploying on Vercel
+
+This repo includes `vercel.json` configured for:
+
+- Python serverless API from `api/index.py`
+- Static frontend build from `frontend/`
+
+### Environment Variables
+
+- `CORS_ALLOW_ORIGINS` (optional, comma-separated). Default is `*`.
+- Frontend optional: `VITE_API_BASE_URL` (if API is hosted elsewhere).
+
+### Important runtime note
+
+OCR + PDF processing dependencies (PyMuPDF, OCR stack, Camelot/Tabula) can be heavy for serverless limits. If Vercel function size or execution time becomes a blocker, deploy `backend/` on a dedicated Python host (Railway/Render/Fly.io) and keep `frontend/` on Vercel.
+
+## OCR / Extraction Notes
+
+For scanned documents, server environment must have Tesseract installed.
+
+`packages.txt` contains apt dependencies used previously in Streamlit deployments:
 
 - `tesseract-ocr`
 - `tesseract-ocr-eng`
-- `ghostscript` (Camelot)
-- `default-jre-headless` (Tabula)
-
-When deployed from GitHub to Streamlit Community Cloud, these packages are
-installed automatically before Python dependencies from `requirements.txt`.
-
-### Generate the Word template (optional)
-
-A pre-prepared Word template can be generated for docxtpl-based rendering:
-
-```bash
-python -m modules.create_template
-```
-
-If the template is not provided by the user, the app generates documents using the built-in fixed structure.
-
-## Running the App
-
-```bash
-streamlit run app.py
-```
-
-Then open the URL shown in the terminal (typically `http://localhost:8501`).
-
-## Usage
-
-1. Enter your OpenAI API key in the sidebar
-2. Select a translation model (stable presets + custom model input)
-3. (Optional) Upload a custom `.docx` structure template in the sidebar
-4. Upload a COA PDF or image file
-5. Review the extracted text
-6. Click **Translate to Russian**
-7. Download the translated `.docx` file
-
-## Fixed COA Document Structure
-
-Every output document contains these sections in order:
-
-| # | Section Key | Russian Label |
-|---|-------------|---------------|
-| 1 | `document_title` | Наименование документа |
-| 2 | `company_info` | Информация о компании |
-| 3 | `product_name` | Наименование продукта |
-| 4 | `product_details` | Сведения о продукте |
-| 5 | `batch_info` | Информация о серии |
-| 6 | `storage_conditions` | Условия хранения |
-| 7 | `test_results` | Результаты испытаний |
-| 8 | `conclusion` | Заключение |
-| 9 | `signatures` | Подписи |
-| 10 | `notes` | Примечания |
-
-The `test_results` section is rendered as a formatted table; all others are text paragraphs.
-
-## Custom Templates
-
-Upload a `.docx` file containing Jinja2 placeholders (e.g. `{{ product_name }}`, `{{ test_results }}`). Available placeholders:
-
-- All 10 section keys from the table above
-- `original_filename` — source PDF filename
-- `translation_date` — date of translation
+- `ghostscript`
+- `default-jre-headless`
 
 ## Project Structure
 
-```
-├── app.py                    # Main Streamlit application
-├── requirements.txt          # Python dependencies
-├── .streamlit/
-│   └── config.toml           # Streamlit theme and server config
-├── modules/
+```text
+.
+├── api/
+│   └── index.py                  # Vercel Python entrypoint
+├── backend/
 │   ├── __init__.py
-│   ├── glossary.py           # Pharmaceutical EN→RU glossary (200+ terms)
-│   ├── coa_structure.py      # Fixed COA section definitions
-│   ├── pdf_extractor.py      # PDF text extraction (pdfplumber, PyMuPDF, OCR)
-│   ├── translator.py         # OpenAI translation (plain + structured JSON)
-│   ├── doc_generator.py      # Word document generation (fixed structure)
-│   └── create_template.py    # Script to generate a sample docxtpl template
-└── templates/
-    └── coa_template.docx     # Sample template (created by create_template.py)
+│   ├── main.py                   # FastAPI routes
+│   └── run.py                    # Local dev runner
+├── frontend/
+│   ├── src/
+│   │   ├── App.tsx               # New UI workflow
+│   │   ├── index.css             # Tailwind + custom design system
+│   │   └── main.tsx
+│   ├── package.json
+│   ├── tailwind.config.ts
+│   └── vite.config.ts
+├── modules/                      # Existing core logic (unchanged)
+│   ├── pdf_extractor.py
+│   ├── translator.py
+│   ├── doc_generator.py
+│   └── ...
+├── templates/
+├── requirements.txt
+└── vercel.json
 ```
-
-## OCR Pipeline
-
-The OCR system is designed for scanned pharmaceutical COA documents:
-
-1. **Page rendering** — PyMuPDF at 300 DPI (preferred), pdfium fallback, then pdfplumber `page.to_image()`
-2. **Image preprocessing** — Grayscale → upscale (if small) → autocontrast → sharpen → binarize
-3. **Tesseract OCR** — PSM 6 (single uniform block, good for forms/tables), OEM 3 (LSTM engine)
-4. **Quality gate** — Pages with fewer than 10 alphanumeric characters are rejected
-5. **Dual-pass** — If preprocessed OCR fails, a second pass without preprocessing is attempted
-6. **Advanced table extraction (optional)** — Camelot/Tabula attempt to recover dense COA tables and append them to extracted text for better translation completeness
-
-## Glossary
-
-The pharmaceutical glossary (`modules/glossary.py`) includes 246 standard translations for:
-
-- Document headers and metadata fields
-- Physical and chemical test parameters
-- Analytical methods (HPLC, GC, MS, etc.)
-- Microbiological tests
-- Dosage forms
-- Units and measurements
-- Regulatory references (USP, EP, BP, etc.)
-- Common COA result phrases
-
-The glossary terms are injected into the OpenAI system prompt to ensure consistent, accurate pharmaceutical translations.
