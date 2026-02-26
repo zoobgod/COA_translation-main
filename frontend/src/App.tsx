@@ -158,6 +158,10 @@ export default function App() {
       if (templateFile) {
         formData.append("template", templateFile);
       }
+      if (apiKey.trim()) {
+        formData.append("api_key", apiKey.trim());
+        formData.append("vision_ocr_model", "gpt-4o-mini");
+      }
 
       const response = await fetch(buildUrl("/api/extract"), {
         method: "POST",
@@ -347,6 +351,11 @@ export default function App() {
                 <p>
                   OCR: <span className="text-fg">{capabilities?.has_ocr ? "available" : "missing"}</span>
                 </p>
+                {!capabilities?.has_ocr ? (
+                  <p className="text-xs">
+                    AI OCR fallback is used automatically during extraction when API key is provided.
+                  </p>
+                ) : null}
                 <p>
                   Tables: <span className="text-fg">{capabilities?.has_camelot || capabilities?.has_tabula ? "advanced extractors ready" : "baseline only"}</span>
                 </p>

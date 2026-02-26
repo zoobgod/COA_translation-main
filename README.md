@@ -47,6 +47,14 @@ python backend/run.py
 
 Backend runs on `http://localhost:8000`.
 
+`requirements.txt` is the Vercel-safe profile (smaller dependency set).
+
+If you need full local OCR/table stack (Tesseract + Camelot/Tabula), install:
+
+```bash
+pip install -r requirements.full.txt
+```
+
 ### 2) Frontend
 
 ```bash
@@ -72,6 +80,9 @@ This repo includes `vercel.json` configured for:
 ### Important runtime note
 
 OCR + PDF processing dependencies (PyMuPDF, OCR stack, Camelot/Tabula) can be heavy for serverless limits. If Vercel function size or execution time becomes a blocker, deploy `backend/` on a dedicated Python host (Railway/Render/Fly.io) and keep `frontend/` on Vercel.
+
+This repo already uses a reduced dependency profile on Vercel to fit Lambda limits.  
+When local OCR is unavailable in runtime, the backend can fallback to OpenAI vision OCR during extraction if an API key is provided.
 
 ## OCR / Extraction Notes
 
@@ -109,5 +120,6 @@ For scanned documents, server environment must have Tesseract installed.
 │   └── ...
 ├── templates/
 ├── requirements.txt
+├── requirements.full.txt
 └── vercel.json
 ```
