@@ -7,6 +7,7 @@ and download the result as a fixed-structure Word document.
 """
 
 import difflib
+import inspect
 
 import streamlit as st
 
@@ -16,6 +17,60 @@ from modules.pdf_extractor import (
 )
 from modules.translator import translate_text_structured
 from modules.doc_generator import generate_structured_doc, extract_template_hints
+
+
+def _run_translation_structured(
+    text: str,
+    api_key: str,
+    model: str,
+    progress_callback,
+    template_hints: dict | None,
+    table_supplement: str,
+):
+    """
+    Call translator with only the kwargs supported by the currently loaded
+    module version. This avoids runtime crashes on Streamlit Cloud workers
+    that may briefly run mixed code during deploy/update.
+    """
+    params = inspect.signature(translate_text_structured).parameters
+    kwargs = {
+        "text": text,
+        "api_key": api_key,
+        "model": model,
+        "progress_callback": progress_callback,
+    }
+    if "template_hints" in params:
+        kwargs["template_hints"] = template_hints
+    if "table_supplement" in params:
+        kwargs["table_supplement"] = table_supplement
+    return translate_text_structured(**kwargs)
+
+
+def _run_generate_structured_doc(
+    sections: dict,
+    original_filename: str,
+    extraction_method: str,
+    model_used: str,
+    user_template_bytes: bytes | None,
+    template_fields: dict,
+    template_heading_map: dict,
+):
+    """
+    Backward-compatible call for doc generation across rolling deploys.
+    """
+    params = inspect.signature(generate_structured_doc).parameters
+    kwargs = {
+        "sections": sections,
+        "original_filename": original_filename,
+        "extraction_method": extraction_method,
+        "model_used": model_used,
+        "user_template_bytes": user_template_bytes,
+    }
+    if "template_fields" in params:
+        kwargs["template_fields"] = template_fields
+    if "template_heading_map" in params:
+        kwargs["template_heading_map"] = template_heading_map
+    return generate_structured_doc(**kwargs)
 
 # ---------------------------------------------------------------------------
 # Page config
@@ -262,7 +317,7 @@ if uploaded_file is not None:
                         )
 
                     with st.spinner("Translating document (structured)..."):
-                        result = translate_text_structured(
+                        result = _run_translation_structured(
                             text=extraction["text"],
                             api_key=api_key,
                             model=selected_model,
@@ -347,7 +402,7 @@ if uploaded_file is not None:
 
                     if "doc_bytes" not in st.session_state or translate_btn:
                         with st.spinner("Generating Word document..."):
-                            doc_bytes = generate_structured_doc(
+                            doc_bytes = _run_generate_structured_doc(
                                 sections=result.get("sections", {}),
                                 original_filename=uploaded_file.name,
                                 extraction_method=extraction["method"],
