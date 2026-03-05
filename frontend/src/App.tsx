@@ -51,9 +51,25 @@ type DiffRow = {
 };
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL as string | undefined)?.replace(/\/$/, "") ?? "";
+const DEFAULT_TIMEOUT_MS = 120_000;
+const AI_HEAVY_TIMEOUT_MS = 300_000;
 
 function buildUrl(path: string): string {
   return `${API_BASE}${path}`;
+}
+
+async function fetchWithTimeout(
+  url: string,
+  init: RequestInit,
+  timeoutMs: number,
+): Promise<Response> {
+  const controller = new AbortController();
+  const timeoutId = window.setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } finally {
+    window.clearTimeout(timeoutId);
+  }
 }
 
 function readFilenameFromContentDisposition(value: string | null): string | null {
@@ -352,10 +368,14 @@ export default function App() {
           oneShotForm.append("template", templateFile);
         }
 
-        const oneShotResp = await fetch(buildUrl("/api/vision-translate"), {
-          method: "POST",
-          body: oneShotForm,
-        });
+        const oneShotResp = await fetchWithTimeout(
+          buildUrl("/api/vision-translate"),
+          {
+            method: "POST",
+            body: oneShotForm,
+          },
+          AI_HEAVY_TIMEOUT_MS,
+        );
         if (!oneShotResp.ok) {
           throw new Error(await getErrorMessage(oneShotResp, "AI OCR+translation failed."));
         }
@@ -385,10 +405,14 @@ export default function App() {
         }
         formData.append("ocr_mode", ocrMode);
 
-        const response = await fetch(buildUrl("/api/extract"), {
-          method: "POST",
-          body: formData,
-        });
+        const response = await fetchWithTimeout(
+          buildUrl("/api/extract"),
+          {
+            method: "POST",
+            body: formData,
+          },
+          AI_HEAVY_TIMEOUT_MS,
+        );
 
         if (!response.ok) {
           throw new Error(await getErrorMessage(response, "Text extraction failed."));
@@ -402,7 +426,11 @@ export default function App() {
         }
       }
     } catch (err) {
-      setErrorMessage(err instanceof Error ? err.message : "Extraction request failed.");
+      if (err instanceof DOMException && err.name === "AbortError") {
+        setErrorMessage("Request timed out while processing. Try a smaller file or retry.");
+      } else {
+        setErrorMessage(err instanceof Error ? err.message : "Extraction request failed.");
+      }
     } finally {
       setExtracting(false);
     }
@@ -448,20 +476,24 @@ export default function App() {
     try {
       let response: Response;
       if (ocrMode === "local_only") {
-        response = await fetch(buildUrl("/api/translate"), {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
+        response = await fetchWithTimeout(
+          buildUrl("/api/translate"),
+          {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              text: extraction?.text ?? "",
+              api_key: apiKey.trim(),
+              model: selectedModel,
+              template_hints: extraction?.template_hints ?? null,
+              table_supplement: extraction?.table_supplement ?? "",
+              custom_glossary: customGlossary,
+            }),
           },
-          body: JSON.stringify({
-            text: extraction?.text ?? "",
-            api_key: apiKey.trim(),
-            model: selectedModel,
-            template_hints: extraction?.template_hints ?? null,
-            table_supplement: extraction?.table_supplement ?? "",
-            custom_glossary: customGlossary,
-          }),
-        });
+          DEFAULT_TIMEOUT_MS,
+        );
       } else {
         const formData = new FormData();
         formData.append("file", coaFile as File);
@@ -471,10 +503,14 @@ export default function App() {
         if (templateFile) {
           formData.append("template", templateFile);
         }
-        response = await fetch(buildUrl("/api/vision-translate"), {
-          method: "POST",
-          body: formData,
-        });
+        response = await fetchWithTimeout(
+          buildUrl("/api/vision-translate"),
+          {
+            method: "POST",
+            body: formData,
+          },
+          AI_HEAVY_TIMEOUT_MS,
+        );
       }
 
       if (!response.ok) {
@@ -487,7 +523,11 @@ export default function App() {
         setErrorMessage(data.error ?? "Translation failed.");
       }
     } catch (err) {
-      setErrorMessage(err instanceof Error ? err.message : "Translation request failed.");
+      if (err instanceof DOMException && err.name === "AbortError") {
+        setErrorMessage("Translation request timed out. Please retry.");
+      } else {
+        setErrorMessage(err instanceof Error ? err.message : "Translation request failed.");
+      }
     } finally {
       setTranslating(false);
       setTranslateProgress(100);
@@ -511,21 +551,25 @@ export default function App() {
     try {
       const templateBase64 = templateFile ? await fileToBase64(templateFile) : null;
 
-      const response = await fetch(buildUrl("/api/generate-doc"), {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
+      const response = await fetchWithTimeout(
+        buildUrl("/api/generate-doc"),
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            sections: translation.sections,
+            original_filename: coaFile.name,
+            extraction_method: extraction.method ?? "unknown",
+            model_used: translation.model_used ?? selectedModel,
+            template_fields: translation.template_fields ?? {},
+            template_heading_map: translation.template_heading_map ?? {},
+            user_template_base64: templateBase64,
+          }),
         },
-        body: JSON.stringify({
-          sections: translation.sections,
-          original_filename: coaFile.name,
-          extraction_method: extraction.method ?? "unknown",
-          model_used: translation.model_used ?? selectedModel,
-          template_fields: translation.template_fields ?? {},
-          template_heading_map: translation.template_heading_map ?? {},
-          user_template_base64: templateBase64,
-        }),
-      });
+        DEFAULT_TIMEOUT_MS,
+      );
 
       if (!response.ok) {
         throw new Error(await getErrorMessage(response, "Document generation failed."));
@@ -546,7 +590,11 @@ export default function App() {
       link.remove();
       URL.revokeObjectURL(url);
     } catch (err) {
-      setErrorMessage(err instanceof Error ? err.message : "Download failed.");
+      if (err instanceof DOMException && err.name === "AbortError") {
+        setErrorMessage("Document generation timed out. Please retry.");
+      } else {
+        setErrorMessage(err instanceof Error ? err.message : "Download failed.");
+      }
     } finally {
       setGenerating(false);
     }
