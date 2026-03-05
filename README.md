@@ -101,6 +101,10 @@ Extraction controls now support:
 - `ocr_mode`: `auto` / `vision_only` / `local_only`
 - `vision_ocr_model`: `gpt-4o` / `gpt-4o-mini`
 
+For scanned/image-like COAs, use:
+- `ocr_mode = vision_only`
+- `vision_ocr_model = gpt-4o`
+
 ## OCR / Extraction Notes
 
 For scanned documents, server environment must have Tesseract installed.

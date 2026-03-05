@@ -10,6 +10,7 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from openai import OpenAI
+from PIL import Image
 from pydantic import BaseModel, Field
 
 from modules.doc_generator import extract_template_hints, generate_structured_doc
@@ -145,45 +146,135 @@ def _is_weak_extraction(payload: dict[str, Any] | None) -> bool:
     return chars_per_page < 650 or alnum_per_page < 260
 
 
+def _filename_looks_like_image(name: str) -> bool:
+    n = (name or "").lower()
+    return n.endswith((".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".webp"))
+
+
+def _looks_like_pdf(file_bytes: bytes, filename: str) -> bool:
+    return b"%PDF-" in file_bytes[:1024] or (filename or "").lower().endswith(".pdf")
+
+
+def _normalise_line_for_merge(text: str) -> str:
+    return " ".join(text.lower().split())
+
+
+def _merge_ocr_text_blocks(blocks: list[str]) -> str:
+    """Merge OCR chunks while removing obvious overlap duplicates."""
+    merged_lines: list[str] = []
+    seen_recent: list[str] = []
+    for block in blocks:
+        for raw_line in block.splitlines():
+            line = raw_line.rstrip()
+            norm = _normalise_line_for_merge(line)
+            if not norm:
+                merged_lines.append("")
+                continue
+            if norm in seen_recent:
+                continue
+            merged_lines.append(line)
+            seen_recent.append(norm)
+            if len(seen_recent) > 48:
+                seen_recent = seen_recent[-48:]
+    return "\n".join(merged_lines).strip()
+
+
+def _split_image_for_dense_ocr(
+    image_bytes: bytes,
+    vertical_parts: int = 3,
+    overlap_px: int = 90,
+) -> list[bytes]:
+    """Split a dense page into overlapping vertical chunks for higher OCR recall."""
+    chunks: list[bytes] = []
+    with Image.open(io.BytesIO(image_bytes)) as img:
+        src = img.convert("RGB")
+        w, h = src.size
+        if h < 1800:
+            return [image_bytes]
+        part_h = max(h // vertical_parts, 1)
+        for idx in range(vertical_parts):
+            top = max(0, idx * part_h - overlap_px)
+            bottom = min(h, (idx + 1) * part_h + overlap_px)
+            crop = src.crop((0, top, w, bottom))
+            buff = io.BytesIO()
+            crop.save(buff, format="PNG")
+            chunks.append(buff.getvalue())
+    return chunks or [image_bytes]
+
+
 def _vision_ocr_image_bytes(
     image_bytes: bytes,
     api_key: str,
-    model: str = "gpt-4o-mini",
+    model: str = "gpt-4o",
 ) -> str:
     """Run OCR via OpenAI vision on a single image payload."""
     client = OpenAI(api_key=api_key)
     b64 = base64.b64encode(image_bytes).decode("utf-8")
     data_url = f"data:image/png;base64,{b64}"
+    system_text = (
+        "You are a high-accuracy OCR engine for pharmaceutical COA pages. "
+        "Extract ALL visible text exactly, including headers, footers, footnotes, "
+        "specification limits, batch fields, and table rows. "
+        "Never summarize. Never translate. Keep original language and numbers."
+    )
+    user_text = (
+        "OCR this page with maximum recall. Preserve reading order top-to-bottom. "
+        "Keep one logical line per line. "
+        "For tables, preserve rows using pipe delimiters: col1 | col2 | col3."
+    )
+
+    # Try Responses API first with high image detail and explicit output budget.
+    if hasattr(client, "responses"):
+        try:
+            response = client.responses.create(
+                model=model,
+                input=[
+                    {
+                        "role": "system",
+                        "content": [{"type": "input_text", "text": system_text}],
+                    },
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "input_text", "text": user_text},
+                            {
+                                "type": "input_image",
+                                "image_url": data_url,
+                                "detail": "high",
+                            },
+                        ],
+                    },
+                ],
+                max_output_tokens=6000,
+            )
+            text = (getattr(response, "output_text", "") or "").strip()
+            if text:
+                return text
+        except Exception as e:
+            logger.info("Responses API OCR failed, fallback to chat: %s", e)
+
+    # Fallback for compatibility.
     response = client.chat.completions.create(
         model=model,
         messages=[
-            {
-                "role": "system",
-                "content": (
-                    "You are a precise OCR engine for pharmaceutical COA documents. "
-                    "Extract all visible text exactly. "
-                    "Do not summarize, translate, or add commentary."
-                ),
-            },
+            {"role": "system", "content": system_text},
             {
                 "role": "user",
                 "content": [
+                    {"type": "text", "text": user_text},
                     {
-                        "type": "text",
-                        "text": (
-                            "Extract full text from this page. Preserve line breaks and "
-                            "table-like rows using pipe separators when obvious."
-                        ),
+                        "type": "image_url",
+                        "image_url": {"url": data_url, "detail": "high"},
                     },
-                    {"type": "image_url", "image_url": {"url": data_url}},
                 ],
             },
         ],
+        max_completion_tokens=6000,
     )
     return (response.choices[0].message.content or "").strip()
 
 
-def _render_pdf_pages_to_png_bytes(pdf_bytes: bytes, max_pages: int = 12) -> list[bytes]:
+def _render_pdf_pages_to_png_bytes(pdf_bytes: bytes, max_pages: int = 50) -> list[bytes]:
     """Render PDF pages to PNG bytes for vision OCR fallback."""
     if not HAS_FITZ:
         return []
@@ -206,7 +297,7 @@ def _extract_with_openai_vision(
     file_bytes: bytes,
     filename: str,
     api_key: str,
-    model: str = "gpt-4o-mini",
+    model: str = "gpt-4o",
 ) -> dict[str, Any] | None:
     """Fallback extraction path for scanned PDFs/images without local OCR stack."""
     name = (filename or "").lower()
@@ -228,6 +319,22 @@ def _extract_with_openai_vision(
                 api_key=api_key,
                 model=model,
             )
+            # If recall is weak for dense pages, OCR chunked page slices.
+            if len(page_text) < 900:
+                chunk_texts: list[str] = []
+                for chunk_bytes in _split_image_for_dense_ocr(image_bytes):
+                    try:
+                        t = _vision_ocr_image_bytes(
+                            image_bytes=chunk_bytes,
+                            api_key=api_key,
+                            model=model,
+                        )
+                    except Exception:
+                        t = ""
+                    if t.strip():
+                        chunk_texts.append(t.strip())
+                if chunk_texts:
+                    page_text = _merge_ocr_text_blocks(chunk_texts)
         except Exception as exc:
             logger.warning("Vision OCR page %s failed: %s", idx, exc)
             continue
@@ -271,11 +378,20 @@ def _extract_with_best_strategy(
         mode = "auto"
 
     should_try_vision = False
-    if api_key.strip() and mode != "local_only":
+    if api_key.strip():
         if mode == "vision_only":
             should_try_vision = True
-        elif _is_weak_extraction(local_result):
-            should_try_vision = True
+        elif mode == "auto":
+            local_method = str(local_result.get("method") or "").lower()
+            text = str(local_result.get("text") or "")
+            pages = max(int(local_result.get("page_count") or 1), 1)
+            chars_per_page = len(text.strip()) / pages
+            should_try_vision = (
+                _filename_looks_like_image(filename)
+                or _is_weak_extraction(local_result)
+                or "ocr" in local_method
+                or chars_per_page < 1700
+            )
 
     vision_result: dict[str, Any] | None = None
     if should_try_vision:
@@ -288,8 +404,37 @@ def _extract_with_best_strategy(
         if vision_result and vision_result.get("success"):
             candidates.append(vision_result)
 
+    if mode == "vision_only":
+        if vision_result and vision_result.get("success"):
+            chosen = dict(vision_result)
+            chosen["quality_score"] = round(_score_extraction_payload(chosen), 2)
+            chosen["local_quality_score"] = round(_score_extraction_payload(local_result), 2)
+            chosen["vision_quality_score"] = round(_score_extraction_payload(vision_result), 2)
+            return chosen
+        if local_result.get("success"):
+            fallback = dict(local_result)
+            fallback["method"] = f"{fallback.get('method', 'local')} (vision failed fallback)"
+            return fallback
+        return {
+            "text": "",
+            "method": "none",
+            "success": False,
+            "page_count": 0,
+            "table_supplement": "",
+            "error": "Vision OCR failed. Try model gpt-4o and a valid API key.",
+        }
+
     if candidates:
-        best = max(candidates, key=_score_extraction_payload)
+        # For image-like sources prefer vision unless it is clearly worse.
+        if (
+            vision_result
+            and vision_result.get("success")
+            and _filename_looks_like_image(filename)
+            and _score_extraction_payload(vision_result) >= (_score_extraction_payload(local_result) * 0.78)
+        ):
+            best = vision_result
+        else:
+            best = max(candidates, key=_score_extraction_payload)
         best = dict(best)
         best["quality_score"] = round(_score_extraction_payload(best), 2)
         best["local_quality_score"] = round(_score_extraction_payload(local_result), 2)

@@ -237,7 +237,7 @@ export default function App() {
   const [modelChoice, setModelChoice] = useState("gpt-4.1");
   const [customModel, setCustomModel] = useState("");
   const [glossaryFile, setGlossaryFile] = useState<File | null>(null);
-  const [ocrMode, setOcrMode] = useState("auto");
+  const [ocrMode, setOcrMode] = useState("vision_only");
   const [visionOcrModel, setVisionOcrModel] = useState("gpt-4o");
 
   const [coaFile, setCoaFile] = useState<File | null>(null);
@@ -318,6 +318,10 @@ export default function App() {
     setErrorMessage(null);
     if (!coaFile) {
       setErrorMessage("Upload a COA file first.");
+      return;
+    }
+    if (ocrMode === "vision_only" && !apiKey.trim()) {
+      setErrorMessage("Vision-first OCR requires an OpenAI API key.");
       return;
     }
 
@@ -563,8 +567,8 @@ export default function App() {
                     value={ocrMode}
                     onChange={(e) => setOcrMode(e.target.value)}
                   >
-                    <option value="auto">Auto (recommended)</option>
-                    <option value="vision_only">Vision-first (best for scans)</option>
+                    <option value="vision_only">Vision-first (recommended for scans)</option>
+                    <option value="auto">Auto hybrid (quality-score select)</option>
                     <option value="local_only">Local-only (no API OCR)</option>
                   </select>
                 </div>
