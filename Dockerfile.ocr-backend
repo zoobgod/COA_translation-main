@@ -1,0 +1,24 @@
+FROM python:3.11-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    tesseract-ocr \
+    tesseract-ocr-eng \
+    ghostscript \
+    default-jre-headless \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY requirements.full.txt /app/requirements.full.txt
+RUN pip install --no-cache-dir -r /app/requirements.full.txt
+
+COPY . /app
+
+ENV PORT=8000
+EXPOSE 8000
+
+CMD ["sh", "-c", "uvicorn backend.main:app --host 0.0.0.0 --port ${PORT}"]

@@ -109,6 +109,42 @@ def _decode_template_from_base64(value: str | None) -> bytes | None:
         raise HTTPException(status_code=400, detail="Invalid template base64 payload") from exc
 
 
+def _score_text_quality(text: str, page_count: int) -> float:
+    """Heuristic quality score used to compare extraction variants."""
+    if not text:
+        return 0.0
+    safe_pages = max(page_count, 1)
+    non_ws = sum(1 for ch in text if not ch.isspace())
+    alnum = sum(1 for ch in text if ch.isalnum())
+    lines = text.count("\n") + 1
+    return alnum + (0.15 * non_ws) + (2.5 * lines) + (0.6 * (alnum / safe_pages))
+
+
+def _score_extraction_payload(payload: dict[str, Any] | None) -> float:
+    if not payload or not payload.get("success"):
+        return 0.0
+    text = str(payload.get("text") or "")
+    page_count = int(payload.get("page_count") or 1)
+    return _score_text_quality(text, page_count)
+
+
+def _is_weak_extraction(payload: dict[str, Any] | None) -> bool:
+    """
+    Identify low-quality extraction (common for scanned/image-like PDFs with
+    hidden sparse text layers).
+    """
+    if not payload or not payload.get("success"):
+        return True
+    text = str(payload.get("text") or "").strip()
+    if not text:
+        return True
+    pages = max(int(payload.get("page_count") or 1), 1)
+    chars_per_page = len(text) / pages
+    alnum_per_page = sum(1 for ch in text if ch.isalnum()) / pages
+    # Typical COA pages are dense; anything below this is usually incomplete.
+    return chars_per_page < 650 or alnum_per_page < 260
+
+
 def _vision_ocr_image_bytes(
     image_bytes: bytes,
     api_key: str,
@@ -154,7 +190,7 @@ def _render_pdf_pages_to_png_bytes(pdf_bytes: bytes, max_pages: int = 12) -> lis
     images: list[bytes] = []
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     try:
-        scale = 200 / 72
+        scale = 300 / 72
         matrix = fitz.Matrix(scale, scale)
         for i, page in enumerate(doc):
             if i >= max_pages:
@@ -211,6 +247,76 @@ def _extract_with_openai_vision(
     }
 
 
+def _extract_with_best_strategy(
+    *,
+    file_bytes: bytes,
+    filename: str,
+    api_key: str,
+    ocr_mode: str = "auto",
+    vision_ocr_model: str = "gpt-4o",
+) -> dict[str, Any]:
+    """
+    Unified extraction strategy:
+    - always try local extractor first (digital text + local OCR when available)
+    - run vision OCR based on mode / weak quality signals
+    - choose the higher-quality result
+    """
+    local_result = extract_text_from_upload(file_bytes, filename=filename)
+    candidates: list[dict[str, Any]] = []
+    if local_result.get("success"):
+        candidates.append(local_result)
+
+    mode = (ocr_mode or "auto").strip().lower()
+    if mode not in {"auto", "vision_only", "local_only"}:
+        mode = "auto"
+
+    should_try_vision = False
+    if api_key.strip() and mode != "local_only":
+        if mode == "vision_only":
+            should_try_vision = True
+        elif _is_weak_extraction(local_result):
+            should_try_vision = True
+
+    vision_result: dict[str, Any] | None = None
+    if should_try_vision:
+        vision_result = _extract_with_openai_vision(
+            file_bytes=file_bytes,
+            filename=filename,
+            api_key=api_key.strip(),
+            model=vision_ocr_model.strip() or "gpt-4o",
+        )
+        if vision_result and vision_result.get("success"):
+            candidates.append(vision_result)
+
+    if candidates:
+        best = max(candidates, key=_score_extraction_payload)
+        best = dict(best)
+        best["quality_score"] = round(_score_extraction_payload(best), 2)
+        best["local_quality_score"] = round(_score_extraction_payload(local_result), 2)
+        best["vision_quality_score"] = (
+            round(_score_extraction_payload(vision_result), 2)
+            if vision_result
+            else 0.0
+        )
+        return best
+
+    # No successful extraction path.
+    if not api_key.strip() and _is_weak_extraction(local_result):
+        return {
+            "text": "",
+            "method": "none",
+            "success": False,
+            "page_count": int(local_result.get("page_count") or 0),
+            "table_supplement": "",
+            "error": (
+                "Could not extract readable text. For scanned/image-based files, "
+                "provide an OpenAI API key to enable Vision OCR fallback."
+            ),
+        }
+
+    return local_result
+
+
 app = FastAPI(title="COA Translator API", version="3.0.0")
 
 allowed_origins_raw = os.getenv("CORS_ALLOW_ORIGINS", "*")
@@ -242,22 +348,20 @@ async def extract(
     file: UploadFile = File(...),
     template: UploadFile | None = File(None),
     api_key: str = Form(""),
-    vision_ocr_model: str = Form("gpt-4o-mini"),
+    vision_ocr_model: str = Form("gpt-4o"),
+    ocr_mode: str = Form("auto"),
 ) -> JSONResponse:
     file_bytes = await file.read()
     if not file_bytes:
         raise HTTPException(status_code=400, detail="Uploaded file is empty")
 
-    extraction = extract_text_from_upload(file_bytes, filename=file.filename or "")
-    if not extraction.get("success") and api_key.strip():
-        vision_result = _extract_with_openai_vision(
-            file_bytes=file_bytes,
-            filename=file.filename or "",
-            api_key=api_key.strip(),
-            model=vision_ocr_model.strip() or "gpt-4o-mini",
-        )
-        if vision_result:
-            extraction = vision_result
+    extraction = _extract_with_best_strategy(
+        file_bytes=file_bytes,
+        filename=file.filename or "",
+        api_key=api_key,
+        ocr_mode=ocr_mode,
+        vision_ocr_model=vision_ocr_model,
+    )
     template_hints = None
 
     if template is not None:
@@ -320,6 +424,8 @@ async def process(
     model: str = Form("gpt-4.1"),
     template: UploadFile | None = File(None),
     custom_glossary: str = Form(""),
+    vision_ocr_model: str = Form("gpt-4o"),
+    ocr_mode: str = Form("auto"),
 ) -> ProcessPipelineResponse:
     try:
         file_bytes = await file.read()
@@ -333,7 +439,13 @@ async def process(
             if template_bytes:
                 template_hints = extract_template_hints(template_bytes)
 
-        extraction = extract_text_from_upload(file_bytes, filename=file.filename or "")
+        extraction = _extract_with_best_strategy(
+            file_bytes=file_bytes,
+            filename=file.filename or "",
+            api_key=api_key,
+            ocr_mode=ocr_mode,
+            vision_ocr_model=vision_ocr_model,
+        )
         if not extraction.get("success"):
             return ProcessPipelineResponse(success=False, extraction=extraction, error=extraction.get("error"))
 

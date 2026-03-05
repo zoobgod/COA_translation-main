@@ -12,6 +12,7 @@ type Capabilities = {
   has_ocr: boolean;
   has_camelot?: boolean;
   has_tabula?: boolean;
+  has_vision_ocr?: boolean;
 };
 
 type TemplateHints = {
@@ -236,6 +237,8 @@ export default function App() {
   const [modelChoice, setModelChoice] = useState("gpt-4.1");
   const [customModel, setCustomModel] = useState("");
   const [glossaryFile, setGlossaryFile] = useState<File | null>(null);
+  const [ocrMode, setOcrMode] = useState("auto");
+  const [visionOcrModel, setVisionOcrModel] = useState("gpt-4o");
 
   const [coaFile, setCoaFile] = useState<File | null>(null);
   const [templateFile, setTemplateFile] = useState<File | null>(null);
@@ -329,8 +332,9 @@ export default function App() {
       }
       if (apiKey.trim()) {
         formData.append("api_key", apiKey.trim());
-        formData.append("vision_ocr_model", "gpt-4o-mini");
+        formData.append("vision_ocr_model", visionOcrModel);
       }
+      formData.append("ocr_mode", ocrMode);
 
       const response = await fetch(buildUrl("/api/extract"), {
         method: "POST",
@@ -553,6 +557,34 @@ export default function App() {
                 ) : null}
 
                 <div>
+                  <label className="mb-1 block text-xs text-fgMuted">OCR strategy</label>
+                  <select
+                    className="select"
+                    value={ocrMode}
+                    onChange={(e) => setOcrMode(e.target.value)}
+                  >
+                    <option value="auto">Auto (recommended)</option>
+                    <option value="vision_only">Vision-first (best for scans)</option>
+                    <option value="local_only">Local-only (no API OCR)</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="mb-1 block text-xs text-fgMuted">Vision OCR model</label>
+                  <select
+                    className="select"
+                    value={visionOcrModel}
+                    onChange={(e) => setVisionOcrModel(e.target.value)}
+                  >
+                    <option value="gpt-4o">gpt-4o (higher quality)</option>
+                    <option value="gpt-4o-mini">gpt-4o-mini (cheaper)</option>
+                  </select>
+                  <p className="mt-1 text-xs text-fgMuted">
+                    Used for scanned/image-like files when strategy allows vision OCR.
+                  </p>
+                </div>
+
+                <div>
                   <label className="mb-1 block text-xs text-fgMuted">Custom glossary (optional)</label>
                   <input
                     className="file"
@@ -595,6 +627,9 @@ export default function App() {
                     AI OCR fallback is used automatically during extraction when API key is provided.
                   </p>
                 ) : null}
+                <p>
+                  Vision OCR: <span className="text-fg">{capabilities?.has_vision_ocr ? "available" : "unavailable"}</span>
+                </p>
                 <p>
                   Tables: <span className="text-fg">{capabilities?.has_camelot || capabilities?.has_tabula ? "advanced extractors ready" : "baseline only"}</span>
                 </p>

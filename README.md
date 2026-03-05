@@ -85,6 +85,22 @@ OCR + PDF processing dependencies (PyMuPDF, OCR stack, Camelot/Tabula) can be he
 This repo already uses a reduced dependency profile on Vercel to fit Lambda limits.  
 When local OCR is unavailable in runtime, the backend can fallback to OpenAI vision OCR during extraction if an API key is provided.
 
+## Best OCR Quality Setup (Recommended)
+
+For the highest parsing quality on scanned and image-like PDFs:
+
+1. Deploy backend as a container with full OCR stack (`requirements.full.txt` + Tesseract/Ghostscript/JRE).
+2. Deploy frontend on Vercel.
+3. Point frontend to backend via `VITE_API_BASE_URL`.
+
+Files:
+- `Dockerfile.ocr-backend` — containerized full OCR backend
+- `backend/DEPLOYMENT.md` — deployment profiles and commands
+
+Extraction controls now support:
+- `ocr_mode`: `auto` / `vision_only` / `local_only`
+- `vision_ocr_model`: `gpt-4o` / `gpt-4o-mini`
+
 ## OCR / Extraction Notes
 
 For scanned documents, server environment must have Tesseract installed.
