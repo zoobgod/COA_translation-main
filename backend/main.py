@@ -671,6 +671,7 @@ def _vision_translate_single_request(
     user_text = (
         "Process all provided pages and return ONLY JSON in this structure:\n"
         "{\n"
+        '  "source_text": "FULL source-language OCR text with no omissions",\n'
         '  "translated_text": "FULL Russian translation with no omissions",\n'
         '  "sections": {\n'
         f"{section_schema}\n"
@@ -737,6 +738,7 @@ def _vision_translate_single_request(
                 raw_output = (comp.choices[0].message.content or "").strip()
 
             parsed = _extract_json_object(raw_output) or {}
+            source_text = str(parsed.get("source_text") or "").strip()
             translated_text = str(parsed.get("translated_text") or "").strip()
             if not translated_text:
                 translated_text = raw_output
@@ -756,6 +758,7 @@ def _vision_translate_single_request(
                 raise RuntimeError("Empty translated text returned by model")
 
             return {
+                "source_text": source_text,
                 "translated_text": translated_text,
                 "sections": sections,
                 "template_fields": template_fields,
@@ -770,6 +773,7 @@ def _vision_translate_single_request(
             logger.warning("vision-translate model '%s' failed: %s", model_id, e)
 
     return {
+        "source_text": "",
         "translated_text": "",
         "sections": {},
         "template_fields": {},

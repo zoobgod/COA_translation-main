@@ -332,31 +332,74 @@ export default function App() {
     setTranslation(null);
 
     try {
-      const formData = new FormData();
-      formData.append("file", coaFile);
-      if (templateFile) {
-        formData.append("template", templateFile);
-      }
-      if (apiKey.trim()) {
-        formData.append("api_key", apiKey.trim());
-        formData.append("vision_ocr_model", visionOcrModel);
-      }
-      formData.append("ocr_mode", ocrMode);
-
-      const response = await fetch(buildUrl("/api/extract"), {
-        method: "POST",
-        body: formData,
-      });
-
-      if (!response.ok) {
-        throw new Error(await getErrorMessage(response, "Text extraction failed."));
+      let customGlossary = "";
+      if (glossaryFile) {
+        try {
+          customGlossary = await readGlossaryFile(glossaryFile);
+        } catch {
+          throw new Error("Could not read glossary file.");
+        }
       }
 
-      const data = (await response.json()) as ExtractionResult;
+      // AI-first mode: run single request OCR+translate right from Extract.
+      if (ocrMode !== "local_only" && apiKey.trim()) {
+        const oneShotForm = new FormData();
+        oneShotForm.append("file", coaFile);
+        oneShotForm.append("api_key", apiKey.trim());
+        oneShotForm.append("model", selectedModel || "gpt-5-chat-latest");
+        oneShotForm.append("custom_glossary", customGlossary);
+        if (templateFile) {
+          oneShotForm.append("template", templateFile);
+        }
 
-      setExtraction(data);
-      if (!data.success) {
-        setErrorMessage(data.error ?? "Text extraction failed.");
+        const oneShotResp = await fetch(buildUrl("/api/vision-translate"), {
+          method: "POST",
+          body: oneShotForm,
+        });
+        if (!oneShotResp.ok) {
+          throw new Error(await getErrorMessage(oneShotResp, "AI OCR+translation failed."));
+        }
+        const oneShotData = (await oneShotResp.json()) as TranslationResult;
+        if (!oneShotData.success) {
+          throw new Error(oneShotData.error ?? "AI OCR+translation failed.");
+        }
+
+        setTranslation(oneShotData);
+        setExtraction({
+          success: true,
+          method: oneShotData.method ?? `AI-first vision translate (${oneShotData.model_used ?? selectedModel})`,
+          text: oneShotData.source_text ?? "",
+          page_count: 0,
+          table_supplement: "",
+          template_hints: null,
+        });
+      } else {
+        const formData = new FormData();
+        formData.append("file", coaFile);
+        if (templateFile) {
+          formData.append("template", templateFile);
+        }
+        if (apiKey.trim()) {
+          formData.append("api_key", apiKey.trim());
+          formData.append("vision_ocr_model", visionOcrModel);
+        }
+        formData.append("ocr_mode", ocrMode);
+
+        const response = await fetch(buildUrl("/api/extract"), {
+          method: "POST",
+          body: formData,
+        });
+
+        if (!response.ok) {
+          throw new Error(await getErrorMessage(response, "Text extraction failed."));
+        }
+
+        const data = (await response.json()) as ExtractionResult;
+
+        setExtraction(data);
+        if (!data.success) {
+          setErrorMessage(data.error ?? "Text extraction failed.");
+        }
       }
     } catch (err) {
       setErrorMessage(err instanceof Error ? err.message : "Extraction request failed.");
@@ -699,7 +742,11 @@ export default function App() {
 
                 <div className="mt-4 flex flex-wrap items-center gap-3">
                   <button className="btn-primary min-w-[180px]" disabled={extracting} type="submit">
-                    {extracting ? "Extracting..." : "Extract Text"}
+                    {extracting
+                      ? "Processing..."
+                      : ocrMode !== "local_only" && apiKey.trim()
+                        ? "AI Parse + Translate"
+                        : "Extract Text"}
                   </button>
                   <span className="text-sm text-fgMuted">
                     {coaFile ? `${coaFile.name} (${(coaFile.size / (1024 * 1024)).toFixed(2)} MB)` : "No file selected"}
