@@ -32,6 +32,7 @@ backend (FastAPI)
 - `GET /api/capabilities`
 - `POST /api/extract` (multipart: `file`, optional `template`)
 - `POST /api/translate` (JSON)
+- `POST /api/vision-translate` (single-call OCR + RU translation + section mapping)
 - `POST /api/generate-doc` (JSON, streams `.docx`)
 - `POST /api/process` (single-call pipeline, multipart)
 

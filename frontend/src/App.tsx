@@ -38,6 +38,9 @@ type TranslationResult = {
   template_heading_map?: Record<string, unknown>;
   model_used?: string;
   chunks_translated?: number;
+  method?: string;
+  source_file?: string;
+  source_text?: string;
   error?: string;
 };
 
@@ -234,7 +237,7 @@ async function getErrorMessage(response: Response, fallback: string): Promise<st
 
 export default function App() {
   const [apiKey, setApiKey] = useState("");
-  const [modelChoice, setModelChoice] = useState("gpt-4.1");
+  const [modelChoice, setModelChoice] = useState("gpt-5-chat-latest");
   const [customModel, setCustomModel] = useState("");
   const [glossaryFile, setGlossaryFile] = useState<File | null>(null);
   const [ocrMode, setOcrMode] = useState("vision_only");
@@ -365,16 +368,21 @@ export default function App() {
   const onTranslate = async () => {
     setErrorMessage(null);
 
-    if (!extraction?.success || !extraction.text) {
-      setErrorMessage("Run extraction before translation.");
-      return;
-    }
     if (!apiKey.trim()) {
       setErrorMessage("Enter your OpenAI API key.");
       return;
     }
     if (!selectedModel) {
       setErrorMessage("Set a valid model ID.");
+      return;
+    }
+    if (ocrMode === "local_only") {
+      if (!extraction?.success || !extraction.text) {
+        setErrorMessage("Run extraction before translation in Local-only mode.");
+        return;
+      }
+    } else if (!coaFile) {
+      setErrorMessage("Upload a COA file before running AI-first translation.");
       return;
     }
 
@@ -395,20 +403,36 @@ export default function App() {
     setTranslating(true);
 
     try {
-      const response = await fetch(buildUrl("/api/translate"), {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          text: extraction.text,
-          api_key: apiKey.trim(),
-          model: selectedModel,
-          template_hints: extraction.template_hints ?? null,
-          table_supplement: extraction.table_supplement ?? "",
-          custom_glossary: customGlossary,
-        }),
-      });
+      let response: Response;
+      if (ocrMode === "local_only") {
+        response = await fetch(buildUrl("/api/translate"), {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            text: extraction?.text ?? "",
+            api_key: apiKey.trim(),
+            model: selectedModel,
+            template_hints: extraction?.template_hints ?? null,
+            table_supplement: extraction?.table_supplement ?? "",
+            custom_glossary: customGlossary,
+          }),
+        });
+      } else {
+        const formData = new FormData();
+        formData.append("file", coaFile as File);
+        formData.append("api_key", apiKey.trim());
+        formData.append("model", selectedModel);
+        formData.append("custom_glossary", customGlossary);
+        if (templateFile) {
+          formData.append("template", templateFile);
+        }
+        response = await fetch(buildUrl("/api/vision-translate"), {
+          method: "POST",
+          body: formData,
+        });
+      }
 
       if (!response.ok) {
         throw new Error(await getErrorMessage(response, "Translation failed."));
@@ -541,6 +565,7 @@ export default function App() {
                     value={modelChoice}
                     onChange={(e) => setModelChoice(e.target.value)}
                   >
+                    <option value="gpt-5-chat-latest">gpt-5-chat-latest</option>
                     <option value="gpt-4.1">gpt-4.1</option>
                     <option value="gpt-4o">gpt-4o</option>
                     <option value="gpt-4o-mini">gpt-4o-mini</option>

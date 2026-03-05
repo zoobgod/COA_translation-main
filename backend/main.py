@@ -1,6 +1,7 @@
 import base64
 import inspect
 import io
+import json
 import logging
 import os
 from pathlib import Path
@@ -10,10 +11,12 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from openai import OpenAI
-from PIL import Image
+from PIL import Image, ImageFilter, ImageOps
 from pydantic import BaseModel, Field
 
+from modules.coa_structure import COA_FIELD_KEYS
 from modules.doc_generator import extract_template_hints, generate_structured_doc
+from modules.glossary import get_glossary_prompt_section
 from modules.pdf_extractor import extract_text_from_upload, get_extraction_capabilities
 from modules.translator import translate_text_structured
 
@@ -220,6 +223,120 @@ def _split_image_for_dense_ocr(
     return chunks or [image_bytes]
 
 
+def _prepare_image_for_vision(
+    image_bytes: bytes,
+    min_width: int = 1800,
+) -> bytes:
+    """
+    Light preprocessing before Vision OCR to improve small-text readability.
+    """
+    with Image.open(io.BytesIO(image_bytes)) as img:
+        rgb = img.convert("RGB")
+        if rgb.width < min_width:
+            scale = min_width / max(rgb.width, 1)
+            rgb = rgb.resize(
+                (int(rgb.width * scale), int(rgb.height * scale)),
+                Image.LANCZOS,
+            )
+        # Keep color image but improve contrast/sharpness for dense scans.
+        rgb = ImageOps.autocontrast(rgb, cutoff=1)
+        rgb = rgb.filter(ImageFilter.SHARPEN)
+        buff = io.BytesIO()
+        rgb.save(buff, format="PNG", optimize=True)
+        return buff.getvalue()
+
+
+def _extract_json_object(raw: str) -> dict[str, Any] | None:
+    text = (raw or "").strip()
+    if not text:
+        return None
+    # Remove markdown fences if present.
+    if text.startswith("```"):
+        lines = [ln for ln in text.splitlines() if not ln.strip().startswith("```")]
+        text = "\n".join(lines).strip()
+    try:
+        obj = json.loads(text)
+        return obj if isinstance(obj, dict) else None
+    except Exception:
+        pass
+    start = text.find("{")
+    end = text.rfind("}")
+    if start >= 0 and end > start:
+        try:
+            obj = json.loads(text[start:end + 1])
+            return obj if isinstance(obj, dict) else None
+        except Exception:
+            return None
+    return None
+
+
+def _normalise_table_rows(value: Any) -> list[list[str]]:
+    if isinstance(value, list):
+        rows: list[list[str]] = []
+        for row in value:
+            if isinstance(row, list):
+                cells = [str(cell).strip() for cell in row]
+                if any(cells):
+                    rows.append(cells)
+            elif isinstance(row, str) and row.strip():
+                if "|" in row:
+                    cells = [part.strip() for part in row.split("|")]
+                    if any(cells):
+                        rows.append(cells)
+        return rows
+    if isinstance(value, str):
+        rows = []
+        for line in value.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            if "|" in line:
+                cells = [part.strip() for part in line.split("|")]
+                if any(cells):
+                    rows.append(cells)
+        return rows
+    return []
+
+
+def _coerce_sections(raw_sections: Any, translated_text: str) -> dict[str, Any]:
+    sections: dict[str, Any] = {}
+    src = raw_sections if isinstance(raw_sections, dict) else {}
+    for key in COA_FIELD_KEYS:
+        if key == "test_results":
+            sections[key] = _normalise_table_rows(src.get(key))
+        else:
+            value = src.get(key, "")
+            sections[key] = str(value).strip() if value is not None else ""
+    if translated_text and not sections.get("notes"):
+        sections["notes"] = translated_text
+    return sections
+
+
+def _coerce_string_map(value: Any) -> dict[str, str]:
+    if not isinstance(value, dict):
+        return {}
+    out: dict[str, str] = {}
+    for k, v in value.items():
+        key = str(k).strip()
+        if key:
+            out[key] = "" if v is None else str(v).strip()
+    return out
+
+
+def _vision_model_candidates(requested: str) -> list[str]:
+    candidates = [
+        (requested or "").strip(),
+        "gpt-5-chat-latest",
+        "gpt-4.1",
+        "gpt-4o",
+    ]
+    deduped: list[str] = []
+    for model in candidates:
+        if model and model not in deduped:
+            deduped.append(model)
+    return deduped
+
+
 def _vision_ocr_image_bytes(
     image_bytes: bytes,
     api_key: str,
@@ -386,7 +503,7 @@ def _render_pdf_pages_to_png_bytes(pdf_bytes: bytes, max_pages: int = 50) -> lis
             if i >= max_pages:
                 break
             pix = page.get_pixmap(matrix=matrix, alpha=False)
-            images.append(pix.tobytes("png"))
+            images.append(_prepare_image_for_vision(pix.tobytes("png")))
     finally:
         doc.close()
     return images
@@ -408,7 +525,7 @@ def _extract_with_openai_vision(
         if not page_images:
             return None
     else:
-        page_images = [file_bytes]
+        page_images = [_prepare_image_for_vision(file_bytes)]
 
     text_parts: list[str] = []
     for idx, image_bytes in enumerate(page_images, start=1):
@@ -458,6 +575,209 @@ def _extract_with_openai_vision(
         "success": True,
         "page_count": len(page_images),
         "table_supplement": "",
+    }
+
+
+def _default_template_fields(template_hints: dict[str, Any] | None) -> dict[str, str]:
+    placeholders = []
+    if isinstance(template_hints, dict):
+        placeholders = template_hints.get("placeholders") or []
+    return {str(p): "" for p in placeholders if str(p).strip()}
+
+
+def _vision_translate_single_request(
+    *,
+    file_bytes: bytes,
+    filename: str,
+    api_key: str,
+    model: str,
+    template_hints: dict[str, Any] | None = None,
+    custom_glossary: str = "",
+) -> dict[str, Any]:
+    """
+    Single OpenAI request path: OCR + direct Russian translation + section mapping.
+    """
+    is_pdf = _looks_like_pdf(file_bytes, filename)
+    if is_pdf:
+        page_images = _render_pdf_pages_to_png_bytes(file_bytes, max_pages=30)
+    else:
+        page_images = [_prepare_image_for_vision(file_bytes)]
+
+    if not page_images:
+        return {
+            "translated_text": "",
+            "sections": {},
+            "template_fields": {},
+            "template_heading_map": {},
+            "success": False,
+            "error": "Could not prepare pages for AI vision translation.",
+            "model_used": model,
+            "chunks_translated": 0,
+        }
+
+    section_schema_lines: list[str] = []
+    for key in COA_FIELD_KEYS:
+        if key == "test_results":
+            section_schema_lines.append(f'      "{key}": [["Показатель","Спецификация","Результат"]]')
+        else:
+            section_schema_lines.append(f'      "{key}": "..."')
+    section_schema = ",\n".join(section_schema_lines)
+
+    glossary_text = get_glossary_prompt_section().strip()
+    user_glossary = (custom_glossary or "").strip()
+    if len(user_glossary) > 24000:
+        user_glossary = user_glossary[:24000]
+
+    template_notes = ""
+    if isinstance(template_hints, dict):
+        placeholders = template_hints.get("placeholders") or []
+        headings = template_hints.get("headings") or []
+        if placeholders:
+            listed = "\n".join(f"- {p}" for p in placeholders[:80])
+            template_notes += (
+                "\nTemplate placeholders to fill in template_fields (empty string if unknown):\n"
+                f"{listed}\n"
+            )
+        if headings:
+            listed = "\n".join(f"- {h}" for h in headings[:30])
+            template_notes += (
+                "\nTemplate heading hints (use in template_heading_map):\n"
+                f"{listed}\n"
+            )
+
+    system_text = (
+        "You are an expert pharmaceutical document OCR + translation engine for "
+        "Certificate of Analysis (COA). These documents are compliance-critical. "
+        "Missing any value, unit, limit, lot field, date, or row is unacceptable.\n\n"
+        "You must perform in ONE pass:\n"
+        "1) OCR every visible source line from the images.\n"
+        "2) Translate ALL source content to Russian with full fidelity.\n"
+        "3) Map translated content into the requested COA JSON sections.\n\n"
+        "Hard rules:\n"
+        "- NO summarization, NO omissions, NO invented data.\n"
+        "- Preserve all numeric values, formulas, lot numbers, CAS, dates, and units exactly.\n"
+        "- Keep table content complete; do not collapse rows.\n"
+        "- If a fragment is unreadable, keep position and use [UNREADABLE] instead of skipping.\n"
+        "- Output valid JSON only.\n\n"
+        "Built-in glossary (mandatory):\n"
+        f"{glossary_text}\n\n"
+    )
+    if user_glossary:
+        system_text += (
+            "User glossary (highest priority, overrides built-in on conflicts):\n"
+            f"{user_glossary}\n\n"
+        )
+
+    user_text = (
+        "Process all provided pages and return ONLY JSON in this structure:\n"
+        "{\n"
+        '  "translated_text": "FULL Russian translation with no omissions",\n'
+        '  "sections": {\n'
+        f"{section_schema}\n"
+        "  },\n"
+        '  "template_fields": {},\n'
+        '  "template_heading_map": {}\n'
+        "}\n"
+        f"{template_notes}"
+    )
+
+    content = [{"type": "input_text", "text": user_text}]
+    for image_bytes in page_images:
+        b64 = base64.b64encode(image_bytes).decode("utf-8")
+        content.append(
+            {
+                "type": "input_image",
+                "image_url": f"data:image/png;base64,{b64}",
+                "detail": "high",
+            }
+        )
+
+    client = OpenAI(api_key=api_key)
+    last_error = "Unknown vision translation error"
+    for model_id in _vision_model_candidates(model):
+        try:
+            raw_output = ""
+            if hasattr(client, "responses"):
+                resp = client.responses.create(
+                    model=model_id,
+                    input=[
+                        {
+                            "role": "system",
+                            "content": [{"type": "input_text", "text": system_text}],
+                        },
+                        {
+                            "role": "user",
+                            "content": content,
+                        },
+                    ],
+                    max_output_tokens=18000,
+                )
+                raw_output = (getattr(resp, "output_text", "") or "").strip()
+            else:
+                chat_content = [{"type": "text", "text": user_text}]
+                for image_bytes in page_images:
+                    b64 = base64.b64encode(image_bytes).decode("utf-8")
+                    chat_content.append(
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": f"data:image/png;base64,{b64}",
+                                "detail": "high",
+                            },
+                        }
+                    )
+                comp = client.chat.completions.create(
+                    model=model_id,
+                    messages=[
+                        {"role": "system", "content": system_text},
+                        {"role": "user", "content": chat_content},
+                    ],
+                    max_completion_tokens=18000,
+                )
+                raw_output = (comp.choices[0].message.content or "").strip()
+
+            parsed = _extract_json_object(raw_output) or {}
+            translated_text = str(parsed.get("translated_text") or "").strip()
+            if not translated_text:
+                translated_text = raw_output
+
+            sections_raw = parsed.get("sections")
+            if not isinstance(sections_raw, dict):
+                sections_raw = parsed
+            sections = _coerce_sections(sections_raw, translated_text)
+
+            template_fields = _coerce_string_map(parsed.get("template_fields"))
+            defaults = _default_template_fields(template_hints)
+            for key, value in defaults.items():
+                template_fields.setdefault(key, value)
+            template_heading_map = _coerce_string_map(parsed.get("template_heading_map"))
+
+            if not translated_text.strip():
+                raise RuntimeError("Empty translated text returned by model")
+
+            return {
+                "translated_text": translated_text,
+                "sections": sections,
+                "template_fields": template_fields,
+                "template_heading_map": template_heading_map,
+                "success": True,
+                "error": None,
+                "model_used": model_id,
+                "chunks_translated": 1,
+            }
+        except Exception as e:
+            last_error = str(e)
+            logger.warning("vision-translate model '%s' failed: %s", model_id, e)
+
+    return {
+        "translated_text": "",
+        "sections": {},
+        "template_fields": {},
+        "template_heading_map": {},
+        "success": False,
+        "error": last_error,
+        "model_used": model,
+        "chunks_translated": 0,
     }
 
 
@@ -641,6 +961,41 @@ def translate(req: TranslateRequest) -> JSONResponse:
     return JSONResponse(content=result, status_code=status_code)
 
 
+@app.post("/api/vision-translate")
+async def vision_translate(
+    file: UploadFile = File(...),
+    api_key: str = Form(...),
+    model: str = Form("gpt-5-chat-latest"),
+    template: UploadFile | None = File(None),
+    custom_glossary: str = Form(""),
+) -> JSONResponse:
+    file_bytes = await file.read()
+    if not file_bytes:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty")
+
+    template_hints = None
+    if template is not None:
+        template_bytes = await template.read()
+        if template_bytes:
+            template_hints = extract_template_hints(template_bytes)
+
+    result = _vision_translate_single_request(
+        file_bytes=file_bytes,
+        filename=file.filename or "",
+        api_key=api_key.strip(),
+        model=model,
+        template_hints=template_hints,
+        custom_glossary=custom_glossary,
+    )
+
+    # Helpful metadata for UI diagnostics.
+    if result.get("success"):
+        result["method"] = f"AI-first vision translate ({result.get('model_used')})"
+        result["source_file"] = file.filename or ""
+    status_code = 200 if result.get("success") else 422
+    return JSONResponse(content=result, status_code=status_code)
+
+
 @app.post("/api/generate-doc")
 def generate_doc(req: GenerateDocRequest) -> StreamingResponse:
     template_bytes = _decode_template_from_base64(req.user_template_base64)
@@ -692,24 +1047,42 @@ async def process(
             if template_bytes:
                 template_hints = extract_template_hints(template_bytes)
 
-        extraction = _extract_with_best_strategy(
-            file_bytes=file_bytes,
-            filename=file.filename or "",
-            api_key=api_key,
-            ocr_mode=ocr_mode,
-            vision_ocr_model=vision_ocr_model,
-        )
-        if not extraction.get("success"):
-            return ProcessPipelineResponse(success=False, extraction=extraction, error=extraction.get("error"))
+        prefer_single_vision = bool(api_key.strip()) and ocr_mode in {"vision_only", "auto"}
+        if prefer_single_vision:
+            translation = _vision_translate_single_request(
+                file_bytes=file_bytes,
+                filename=file.filename or "",
+                api_key=api_key.strip(),
+                model=model,
+                template_hints=template_hints,
+                custom_glossary=custom_glossary,
+            )
+            extraction = {
+                "success": translation.get("success", False),
+                "text": "",
+                "method": f"AI-first vision translate ({translation.get('model_used', model)})",
+                "page_count": 0,
+                "table_supplement": "",
+            }
+        else:
+            extraction = _extract_with_best_strategy(
+                file_bytes=file_bytes,
+                filename=file.filename or "",
+                api_key=api_key,
+                ocr_mode=ocr_mode,
+                vision_ocr_model=vision_ocr_model,
+            )
+            if not extraction.get("success"):
+                return ProcessPipelineResponse(success=False, extraction=extraction, error=extraction.get("error"))
 
-        translation = _run_translation_structured(
-            text=extraction["text"],
-            api_key=api_key,
-            model=model,
-            template_hints=template_hints,
-            table_supplement=extraction.get("table_supplement", ""),
-            custom_glossary=custom_glossary,
-        )
+            translation = _run_translation_structured(
+                text=extraction["text"],
+                api_key=api_key,
+                model=model,
+                template_hints=template_hints,
+                table_supplement=extraction.get("table_supplement", ""),
+                custom_glossary=custom_glossary,
+            )
         if not translation.get("success"):
             return ProcessPipelineResponse(
                 success=False,
