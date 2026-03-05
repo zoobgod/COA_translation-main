@@ -102,7 +102,7 @@ Extraction controls now support:
 - `vision_ocr_model`: `gpt-4o` / `gpt-4o-mini`
 
 For scanned/image-like COAs, use:
-- `ocr_mode = vision_only`
+- `ocr_mode = vision_only` (AI-first strict)
 - `vision_ocr_model = gpt-4o`
 
 ## OCR / Extraction Notes

@@ -179,17 +179,35 @@ def _merge_ocr_text_blocks(blocks: list[str]) -> str:
     return "\n".join(merged_lines).strip()
 
 
+def _unique_alnum_gain(primary_text: str, secondary_text: str) -> int:
+    """
+    Rough measure of unique content contributed by the secondary text.
+    """
+    primary_lines = {
+        _normalise_line_for_merge(line)
+        for line in (primary_text or "").splitlines()
+        if _normalise_line_for_merge(line)
+    }
+    gain = 0
+    for line in (secondary_text or "").splitlines():
+        norm = _normalise_line_for_merge(line)
+        if not norm or norm in primary_lines:
+            continue
+        gain += sum(1 for ch in line if ch.isalnum())
+    return gain
+
+
 def _split_image_for_dense_ocr(
     image_bytes: bytes,
-    vertical_parts: int = 3,
-    overlap_px: int = 90,
+    vertical_parts: int = 4,
+    overlap_px: int = 120,
 ) -> list[bytes]:
     """Split a dense page into overlapping vertical chunks for higher OCR recall."""
     chunks: list[bytes] = []
     with Image.open(io.BytesIO(image_bytes)) as img:
         src = img.convert("RGB")
         w, h = src.size
-        if h < 1800:
+        if h < 1400:
             return [image_bytes]
         part_h = max(h // vertical_parts, 1)
         for idx in range(vertical_parts):
@@ -212,15 +230,17 @@ def _vision_ocr_image_bytes(
     b64 = base64.b64encode(image_bytes).decode("utf-8")
     data_url = f"data:image/png;base64,{b64}"
     system_text = (
-        "You are a high-accuracy OCR engine for pharmaceutical COA pages. "
-        "Extract ALL visible text exactly, including headers, footers, footnotes, "
-        "specification limits, batch fields, and table rows. "
-        "Never summarize. Never translate. Keep original language and numbers."
+        "You are an ultra-accurate OCR engine for pharmaceutical Certificate of Analysis (COA) documents. "
+        "These are compliance-critical files. Missing a single limit/value/row is unacceptable. "
+        "Extract ALL visible text exactly, including headers, footers, small-print notes, "
+        "specification limits, batch fields, methods, acceptance criteria, and table rows. "
+        "Do NOT summarize. Do NOT translate. Do NOT infer. Keep original language, punctuation, and numbers."
     )
     user_text = (
-        "OCR this page with maximum recall. Preserve reading order top-to-bottom. "
-        "Keep one logical line per line. "
-        "For tables, preserve rows using pipe delimiters: col1 | col2 | col3."
+        "OCR this page with maximum recall and precision. "
+        "Preserve reading order top-to-bottom. Keep one logical line per line. "
+        "For tables, preserve each row using pipe delimiters, e.g. col1 | col2 | col3. "
+        "Include every detected line, including short codes and tiny text."
     )
 
     # Try Responses API first with high image detail and explicit output budget.
@@ -274,6 +294,85 @@ def _vision_ocr_image_bytes(
     return (response.choices[0].message.content or "").strip()
 
 
+def _vision_ocr_recall_pass(
+    *,
+    image_bytes: bytes,
+    draft_text: str,
+    api_key: str,
+    model: str = "gpt-4o",
+) -> str:
+    """
+    Second vision pass: find text missed by the first OCR draft.
+    Returns only additional missing lines.
+    """
+    client = OpenAI(api_key=api_key)
+    b64 = base64.b64encode(image_bytes).decode("utf-8")
+    data_url = f"data:image/png;base64,{b64}"
+
+    system_text = (
+        "You are auditing OCR completeness for a pharmaceutical COA page. "
+        "Return ONLY text lines missing from the provided OCR draft. "
+        "Critical: do not omit numeric values, limits, units, or table cells."
+    )
+    user_text = (
+        "Given the image and existing OCR draft, output only missing lines. "
+        "No commentary. If nothing is missing, return an empty string.\n\n"
+        "=== OCR DRAFT START ===\n"
+        f"{draft_text}\n"
+        "=== OCR DRAFT END ==="
+    )
+
+    if hasattr(client, "responses"):
+        try:
+            resp = client.responses.create(
+                model=model,
+                input=[
+                    {
+                        "role": "system",
+                        "content": [{"type": "input_text", "text": system_text}],
+                    },
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "input_text", "text": user_text},
+                            {
+                                "type": "input_image",
+                                "image_url": data_url,
+                                "detail": "high",
+                            },
+                        ],
+                    },
+                ],
+                max_output_tokens=2500,
+            )
+            return (getattr(resp, "output_text", "") or "").strip()
+        except Exception as e:
+            logger.info("Vision recall pass (responses) failed: %s", e)
+
+    try:
+        resp = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": system_text},
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": user_text},
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": data_url, "detail": "high"},
+                        },
+                    ],
+                },
+            ],
+            max_completion_tokens=2500,
+        )
+        return (resp.choices[0].message.content or "").strip()
+    except Exception as e:
+        logger.info("Vision recall pass (chat) failed: %s", e)
+        return ""
+
+
 def _render_pdf_pages_to_png_bytes(pdf_bytes: bytes, max_pages: int = 50) -> list[bytes]:
     """Render PDF pages to PNG bytes for vision OCR fallback."""
     if not HAS_FITZ:
@@ -314,27 +413,35 @@ def _extract_with_openai_vision(
     text_parts: list[str] = []
     for idx, image_bytes in enumerate(page_images, start=1):
         try:
-            page_text = _vision_ocr_image_bytes(
+            primary_text = _vision_ocr_image_bytes(
                 image_bytes=image_bytes,
                 api_key=api_key,
                 model=model,
             )
-            # If recall is weak for dense pages, OCR chunked page slices.
-            if len(page_text) < 900:
-                chunk_texts: list[str] = []
-                for chunk_bytes in _split_image_for_dense_ocr(image_bytes):
-                    try:
-                        t = _vision_ocr_image_bytes(
-                            image_bytes=chunk_bytes,
-                            api_key=api_key,
-                            model=model,
-                        )
-                    except Exception:
-                        t = ""
-                    if t.strip():
-                        chunk_texts.append(t.strip())
-                if chunk_texts:
-                    page_text = _merge_ocr_text_blocks(chunk_texts)
+            chunk_texts: list[str] = []
+            for chunk_bytes in _split_image_for_dense_ocr(image_bytes):
+                try:
+                    t = _vision_ocr_image_bytes(
+                        image_bytes=chunk_bytes,
+                        api_key=api_key,
+                        model=model,
+                    )
+                except Exception:
+                    t = ""
+                if t.strip():
+                    chunk_texts.append(t.strip())
+
+            page_text = _merge_ocr_text_blocks([primary_text] + chunk_texts)
+
+            # Recall pass to capture lines still missed in previous outputs.
+            missing_lines = _vision_ocr_recall_pass(
+                image_bytes=image_bytes,
+                draft_text=page_text,
+                api_key=api_key,
+                model=model,
+            )
+            if missing_lines.strip():
+                page_text = _merge_ocr_text_blocks([page_text, missing_lines])
         except Exception as exc:
             logger.warning("Vision OCR page %s failed: %s", idx, exc)
             continue
@@ -368,85 +475,86 @@ def _extract_with_best_strategy(
     - run vision OCR based on mode / weak quality signals
     - choose the higher-quality result
     """
-    local_result = extract_text_from_upload(file_bytes, filename=filename)
-    candidates: list[dict[str, Any]] = []
-    if local_result.get("success"):
-        candidates.append(local_result)
-
     mode = (ocr_mode or "auto").strip().lower()
     if mode not in {"auto", "vision_only", "local_only"}:
         mode = "auto"
 
-    should_try_vision = False
-    if api_key.strip():
-        if mode == "vision_only":
-            should_try_vision = True
-        elif mode == "auto":
-            local_method = str(local_result.get("method") or "").lower()
-            text = str(local_result.get("text") or "")
-            pages = max(int(local_result.get("page_count") or 1), 1)
-            chars_per_page = len(text.strip()) / pages
-            should_try_vision = (
-                _filename_looks_like_image(filename)
-                or _is_weak_extraction(local_result)
-                or "ocr" in local_method
-                or chars_per_page < 1700
-            )
-
+    use_ai_first = bool(api_key.strip()) and mode != "local_only"
     vision_result: dict[str, Any] | None = None
-    if should_try_vision:
+    local_result: dict[str, Any] | None = None
+
+    if use_ai_first:
         vision_result = _extract_with_openai_vision(
             file_bytes=file_bytes,
             filename=filename,
             api_key=api_key.strip(),
             model=vision_ocr_model.strip() or "gpt-4o",
         )
-        if vision_result and vision_result.get("success"):
-            candidates.append(vision_result)
+        # Second request path: run local extraction after AI to recover any extras.
+        local_result = extract_text_from_upload(file_bytes, filename=filename)
 
-    if mode == "vision_only":
         if vision_result and vision_result.get("success"):
             chosen = dict(vision_result)
+
+            if local_result and local_result.get("success"):
+                local_text = str(local_result.get("text") or "")
+                vision_text = str(vision_result.get("text") or "")
+                gain = _unique_alnum_gain(vision_text, local_text)
+                if gain >= 140:
+                    merged_text = _merge_ocr_text_blocks([vision_text, local_text])
+                    if merged_text:
+                        chosen["text"] = merged_text
+                        chosen["method"] = (
+                            f"{vision_result.get('method')} + local recovery"
+                        )
+                        chosen["page_count"] = max(
+                            int(vision_result.get("page_count") or 1),
+                            int(local_result.get("page_count") or 1),
+                        )
+
+            chosen["success"] = True
+            chosen["table_supplement"] = (
+                local_result.get("table_supplement", "")
+                if local_result and local_result.get("success")
+                else ""
+            )
             chosen["quality_score"] = round(_score_extraction_payload(chosen), 2)
-            chosen["local_quality_score"] = round(_score_extraction_payload(local_result), 2)
             chosen["vision_quality_score"] = round(_score_extraction_payload(vision_result), 2)
+            chosen["local_quality_score"] = (
+                round(_score_extraction_payload(local_result), 2)
+                if local_result
+                else 0.0
+            )
             return chosen
-        if local_result.get("success"):
+
+        # AI-first requested but failed: fallback to local pass result.
+        if local_result and local_result.get("success"):
             fallback = dict(local_result)
-            fallback["method"] = f"{fallback.get('method', 'local')} (vision failed fallback)"
+            fallback["method"] = f"{fallback.get('method', 'local')} (AI-first fallback)"
+            fallback["quality_score"] = round(_score_extraction_payload(fallback), 2)
+            fallback["vision_quality_score"] = 0.0
+            fallback["local_quality_score"] = round(_score_extraction_payload(local_result), 2)
             return fallback
+
         return {
             "text": "",
             "method": "none",
             "success": False,
             "page_count": 0,
             "table_supplement": "",
-            "error": "Vision OCR failed. Try model gpt-4o and a valid API key.",
+            "error": "AI-first OCR failed to extract readable text from this file.",
         }
 
-    if candidates:
-        # For image-like sources prefer vision unless it is clearly worse.
-        if (
-            vision_result
-            and vision_result.get("success")
-            and _filename_looks_like_image(filename)
-            and _score_extraction_payload(vision_result) >= (_score_extraction_payload(local_result) * 0.78)
-        ):
-            best = vision_result
-        else:
-            best = max(candidates, key=_score_extraction_payload)
-        best = dict(best)
-        best["quality_score"] = round(_score_extraction_payload(best), 2)
-        best["local_quality_score"] = round(_score_extraction_payload(local_result), 2)
-        best["vision_quality_score"] = (
-            round(_score_extraction_payload(vision_result), 2)
-            if vision_result
-            else 0.0
-        )
-        return best
+    # local_only or no API key provided
+    local_result = extract_text_from_upload(file_bytes, filename=filename)
+    if local_result.get("success"):
+        local_result = dict(local_result)
+        local_result["quality_score"] = round(_score_extraction_payload(local_result), 2)
+        local_result["vision_quality_score"] = 0.0
+        local_result["local_quality_score"] = round(_score_extraction_payload(local_result), 2)
+        return local_result
 
-    # No successful extraction path.
-    if not api_key.strip() and _is_weak_extraction(local_result):
+    if _is_weak_extraction(local_result):
         return {
             "text": "",
             "method": "none",
@@ -454,8 +562,8 @@ def _extract_with_best_strategy(
             "page_count": int(local_result.get("page_count") or 0),
             "table_supplement": "",
             "error": (
-                "Could not extract readable text. For scanned/image-based files, "
-                "provide an OpenAI API key to enable Vision OCR fallback."
+                "Could not extract readable text. Provide an OpenAI API key and use "
+                "Vision-first OCR for scanned/image-like files."
             ),
         }
 

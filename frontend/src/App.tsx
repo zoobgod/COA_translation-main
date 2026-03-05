@@ -567,8 +567,8 @@ export default function App() {
                     value={ocrMode}
                     onChange={(e) => setOcrMode(e.target.value)}
                   >
-                    <option value="vision_only">Vision-first (recommended for scans)</option>
-                    <option value="auto">Auto hybrid (quality-score select)</option>
+                    <option value="vision_only">AI-first strict (recommended)</option>
+                    <option value="auto">AI-first + local recovery</option>
                     <option value="local_only">Local-only (no API OCR)</option>
                   </select>
                 </div>
@@ -584,7 +584,7 @@ export default function App() {
                     <option value="gpt-4o-mini">gpt-4o-mini (cheaper)</option>
                   </select>
                   <p className="mt-1 text-xs text-fgMuted">
-                    Used for scanned/image-like files when strategy allows vision OCR.
+                    Used for AI-first extraction on scanned/image-like files.
                   </p>
                 </div>
 
